@@ -1,0 +1,28 @@
+# EvidGeo requirements
+# Install with: pip install -r requirements.txt
+
+# Core ML / diffusion
+torch>=2.0
+torchvision>=0.15
+diffusers>=0.27
+transformers>=5.0
+accelerate>=0.27
+safetensors>=0.4
+
+# Data / images
+datasets>=2.18
+pillow>=9.0
+ftfy
+
+# Evaluation
+lpips
+scikit-image>=0.21
+scikit-learn>=1.3
+scipy>=1.11
+networkx>=3.0
+
+# Utilities
+numpy>=1.24
+pandas>=2.0
+tqdm
+matplotlib>=3.7
