@@ -83,6 +83,9 @@ class Generator:
             else:
                 self.pipe.to(device)
         self.pipe.set_progress_bar_config(disable=True)
+        if hasattr(self.pipe.vae, "enable_tiling"):
+            # i2i encodes the source photo; without tiling this needs a ~4.5 GB block (OOM on T4)
+            self.pipe.vae.enable_tiling()
         self.i2i = None
         if spec.i2i:
             # Build from the same modules rather than from_pipe(), which calls .to() and
