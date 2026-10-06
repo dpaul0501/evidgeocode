@@ -56,6 +56,8 @@ def parse_args():
     ap.add_argument("--hf-split", default="train")
     ap.add_argument("--hf-shuffle-seed", type=int, default=42)
     ap.add_argument("--seed-base", type=int, default=20261005)
+    ap.add_argument("--device-map", default=None,
+                    help='"balanced" splits the pipeline over all GPUs (e.g. Kaggle 2xT4)')
     ap.add_argument("--offload", action="store_true",
                     help="CPU-offload idle submodules (needed for 16 GB GPUs with large text encoders)")
     return ap.parse_args()
@@ -105,7 +107,10 @@ def main():
         coco = load_dataset(args.hf_dataset, split=args.hf_split).shuffle(
             seed=args.hf_shuffle_seed).select(range(max(gids) + 1))
 
-    gen = load_model(spec, steps=args.steps, size=args.size, offload=args.offload)
+    print(f"GPUs visible: {torch.cuda.device_count()} "
+          f"{[torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]}", flush=True)
+    gen = load_model(spec, steps=args.steps, size=args.size, offload=args.offload,
+                     device_map=args.device_map)
     meta_fp = open(os.path.join(args.out, "meta", f"{spec.name}_sh{shard_i:02d}.jsonl"), "a")
     t0, done = time.time(), 0
     for gid in gids:
@@ -144,6 +149,7 @@ def main():
                 meta_fp.write(json.dumps(rec) + "\n")
                 meta_fp.flush()
                 done += 1
+                print(f"  {mode} seed{k}: {time.time() - t0:.0f}s elapsed, {done} images", flush=True)
         rate = done / max(1e-9, time.time() - t0)
         print(f"gid {gid}: {done} images, {rate:.2f} img/s", flush=True)
 

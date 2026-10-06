@@ -64,7 +64,8 @@ MODELS = {s.name: s for s in [
 
 class Generator:
     def __init__(self, spec: Spec, steps: int | None = None, size: int = 512,
-                 device: str = "cuda", dtype=torch.bfloat16, offload: bool = False):
+                 device: str = "cuda", dtype=torch.bfloat16, offload: bool = False,
+                 device_map: str | None = None):
         import diffusers
 
         self.spec, self.size, self.device = spec, size, device
@@ -73,11 +74,14 @@ class Generator:
             dtype = torch.float16
         self.dtype = dtype
         cls = getattr(diffusers, spec.t2i)
-        self.pipe = cls.from_pretrained(spec.repo, torch_dtype=dtype)
-        if offload:
-            self.pipe.enable_model_cpu_offload()
+        if device_map:  # e.g. "balanced": spread components over all visible GPUs
+            self.pipe = cls.from_pretrained(spec.repo, torch_dtype=dtype, device_map=device_map)
         else:
-            self.pipe.to(device)
+            self.pipe = cls.from_pretrained(spec.repo, torch_dtype=dtype)
+            if offload:
+                self.pipe.enable_model_cpu_offload()
+            else:
+                self.pipe.to(device)
         self.pipe.set_progress_bar_config(disable=True)
         self.i2i = None
         if spec.i2i:
@@ -88,6 +92,7 @@ class Generator:
     @torch.no_grad()
     def decode(self, pipe, lat: torch.Tensor) -> Image.Image:
         vae = pipe.vae
+        lat = lat.to(vae.device)  # with device_map the VAE may sit on another GPU
         name = self.spec.name
         if name.startswith("sd35"):
             x = lat / vae.config.scaling_factor + vae.config.shift_factor
