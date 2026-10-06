@@ -9,3 +9,7 @@ zicdgrRr
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# local Kaggle kernel builds and outputs
+kaggle/build/
+kaggle_out/

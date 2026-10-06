@@ -36,9 +36,13 @@ def parse_args():
     ap.add_argument("--consistency-root", default="")
     ap.add_argument("--consistency-model", default="sd",
                     help="Generator of the consistency corpus (not recorded on Drive)")
-    ap.add_argument("--master-manifest", required=True,
+    ap.add_argument("--master-manifest", default="",
                     help="Captions in HF shuffle order covering every corpus "
                          "(multiguide_coco_v2/cache/manifest_v3_N5000_seed42.jsonl)")
+    ap.add_argument("--trajectory-roots", nargs="*", default=[],
+                    help="Roots with traj/<model>/<mode>/<gid>_seed<k>_step<t>.png")
+    ap.add_argument("--external", nargs="*", default=[],
+                    help="JSONL manifests of other image sets (faces, memes, ...)")
     ap.add_argument("--real", action="store_true", help="Also evaluate the paired real COCO images")
     ap.add_argument("--hf-dataset", default="Erland/coco_captions_small")
     ap.add_argument("--hf-split", default="train")
@@ -63,14 +67,19 @@ def parse_args():
 
 
 def collect(args) -> list[D.Record]:
-    master = [c for _, c in sorted(D.find_manifest("", args.master_manifest).items())]
+    master = ([c for _, c in sorted(D.find_manifest("", args.master_manifest).items())]
+              if args.master_manifest else [])
     print(f"master caption order: {len(master)} rows")
     recs: list[D.Record] = []
     for root in args.guidance_roots:
         recs += D.guidance_records(root, master)
     if args.consistency_root:
         recs += D.consistency_records(args.consistency_root, master, args.consistency_model)
+    for root in args.trajectory_roots:
+        recs += D.trajectory_records(root, master)
+    ext = [r for j in args.external for r in D.external_records(j)]
     unpaired = sum(1 for r in recs if r.hf_row < 0)
+    recs += ext
     if unpaired:
         print(f"WARNING: {unpaired} generated images have no master row (no real pair)")
     if args.real:
@@ -122,6 +131,9 @@ def process_chunk(attr, recs, imgs, args) -> tuple[pd.DataFrame, dict]:
                     row[f"{pre}pec_swap_rho"] = np.nan if same else spearman(maps["pec"][i], swap[i])
                     row[f"{pre}pec_sal_rho"] = spearman(maps["pec"][i], maps["sal"][i])
             maps["rollout"], emb = attr.rollout(x, g)
+            cos = (emb * txt).sum(-1).double().cpu().numpy()  # full-image CLIP similarity
+            for i, row in enumerate(batch_rows):
+                row["clip_cos"] = float(cos[i])
             if not args.no_loo:
                 drops, base = attr.loo(x, txt, g)
                 pos = np.clip(drops, 0, None)
@@ -142,7 +154,7 @@ def process_chunk(attr, recs, imgs, args) -> tuple[pd.DataFrame, dict]:
                         row[f"{pre}gauss{sg:g}_leak"] = S.mass_leak(pos[i], sg)
                         row[f"{pre}gauss{sg:g}_peak_shift"] = int(
                             np.argmax(maps[f"gauss{sg:g}"][i]) != np.argmax(pos[i]))
-                    row["clip_cos"] = float(base[i])
+
             for name in ("pec", "sal", "rollout", "loo", "ss"):
                 if name in maps:
                     store.setdefault(f"g{g}_{name}", []).append(maps[name].astype(np.float32))
@@ -169,7 +181,7 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     recs = collect(args)
     print(f"{len(recs)} images found")
-    recs.sort(key=lambda r: (bucket_of(r), r.gid, r.seed))
+    recs.sort(key=lambda r: (bucket_of(r), r.gid, r.seed, r.step))
 
     # deterministic faithfulness subset: first N gids of each bucket
     args.faith_per_bucket_cutoff = {}

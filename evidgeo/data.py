@@ -9,6 +9,12 @@ Layouts (as produced by datagen_coco.py and the consistency notebook):
                <root>/meta/*.jsonl            per-image generation records
   consistency  <root>/images/<mode>/<prompt_id:04d>_seed<k>.png
                <root>/cache/selected_prompts.json  [{"global_id", "caption"}]
+  multi-seed   <root>/images/<model>/<mode>/<gid:05d>_seed<k>.png    (generate_modern.py)
+  trajectory   <root>/traj/<model>/<mode>/<gid:05d>_seed<k>_step<t>.png  x0 previews
+  external     any image set (faces, memes, ...) listed in a JSONL file:
+               {"image": path, "text": str, "group"?: int, "model"?: str,
+                "mode"?: str, "label"?: str, "seed"?: int}
+               image paths are relative to the JSONL's folder.
   real         rows of the HF dataset after .shuffle(42) (the "master" order,
                manifest_v3_N5000_seed42.jsonl), the same rows used as captions
                and i2i sources. Paired to generated images by hf_row.
@@ -23,7 +29,8 @@ from glob import glob
 
 from PIL import Image
 
-GID_RE = re.compile(r"^(\d+)\.png$")
+GID_RE = re.compile(r"^(\d+)(?:_seed(\d+))?\.png$")
+TRAJ_RE = re.compile(r"^(\d+)_seed(\d+)_step(\d+)\.png$")
 CONS_RE = re.compile(r"^(\d+)_seed(\d+)\.png$")
 
 
@@ -38,9 +45,12 @@ class Record:
     hf_row: int        # row of the paired real image in the master HF order
     path: str          # image file, or "hf:<row>" for real images not yet cached
     caption: str
+    step: int = -1     # denoising step for trajectory previews
+    label: str = ""    # external corpora: class label (e.g. hateful / not)
 
     def key(self) -> str:
-        return f"{self.corpus}/{self.dataset}/{self.model}/{self.mode}/{self.gid}/{self.seed}"
+        k = f"{self.corpus}/{self.dataset}/{self.model}/{self.mode}/{self.gid}/{self.seed}"
+        return k if self.step < 0 else f"{k}/{self.step}"
 
 
 MANIFEST_PREFERENCE = ("only_new", "Erland__coco_captions_small", "manifest")
@@ -137,9 +147,41 @@ def guidance_records(root: str, master: list[str], manifest: dict[int, str] | No
                 continue
             gid = int(m.group(1))
             rec = meta.get((model, mode, gid), {})
+            seed = int(m.group(2)) if m.group(2) is not None else int(rec.get("seed", -1))
             cap = manifest.get(gid) or rec.get("caption") or rec.get("caption_proxy") or ""
-            recs.append(Record("guidance", dataset, model, mode, gid, int(rec.get("seed", -1)),
+            recs.append(Record("guidance", dataset, model, mode, gid, seed,
                                rows.get(gid, -1), os.path.join(ddir, name), cap))
+    return recs
+
+
+def trajectory_records(root: str, master: list[str]) -> list[Record]:
+    dataset = os.path.basename(os.path.normpath(root))
+    manifest = find_manifest(root)
+    rows = hf_rows_for(manifest, master)
+    recs = []
+    for path in sorted(glob(os.path.join(root, "traj", "*", "*", "*.png"))):
+        m = TRAJ_RE.match(os.path.basename(path))
+        if not m:
+            continue
+        mode_dir = os.path.dirname(path)
+        gid, seed, step = (int(x) for x in m.groups())
+        recs.append(Record("trajectory", dataset, os.path.basename(os.path.dirname(mode_dir)),
+                           os.path.basename(mode_dir), gid, seed, rows.get(gid, -1), path,
+                           manifest.get(gid, ""), step=step))
+    return recs
+
+
+def external_records(jsonl: str, name: str = "") -> list[Record]:
+    """Faces, memes, or any captioned image set, described by one JSONL file."""
+    base = os.path.dirname(os.path.abspath(jsonl))
+    name = name or os.path.splitext(os.path.basename(jsonl))[0]
+    recs = []
+    for i, r in enumerate(read_jsonl(jsonl)):
+        path = r["image"] if os.path.isabs(r["image"]) else os.path.join(base, r["image"])
+        recs.append(Record("external", name, str(r.get("model", "real")),
+                           str(r.get("mode", r.get("label", "all"))), int(r.get("group", i)),
+                           int(r.get("seed", -1)), -1, path, r.get("text", ""),
+                           label=str(r.get("label", ""))))
     return recs
 
 

@@ -30,6 +30,7 @@ from scipy import stats
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from evidgeo import metrics as M  # noqa: E402
+from evidgeo import uncertainty as U  # noqa: E402
 
 SIGNALS = ["pec", "rollout", "ss", "loo", "sal"]
 PAIRS = [("text", "weak"), ("i2i", "weak"), ("text", "i2i")]
@@ -93,14 +94,22 @@ def fmt(v) -> str:
 def load(run: str, g: int):
     df = pd.concat([pd.read_parquet(p) for p in glob(f"{run}/features/**/*.parquet", recursive=True)],
                    ignore_index=True)
+    if "step" not in df:
+        df["step"] = -1
+    df["step"] = df["step"].fillna(-1).astype(int)
     df["key"] = (df.corpus + "/" + df.dataset + "/" + df.model + "/" + df["mode"] + "/" +
                  df.gid.astype(str) + "/" + df.seed.astype(str))
+    has_step = df.step >= 0  # must match Record.key()
+    df.loc[has_step, "key"] = df.loc[has_step, "key"] + "/" + df.loc[has_step, "step"].astype(str)
     store = {}
     for p in glob(f"{run}/maps/**/*.npz", recursive=True):
         z = np.load(p)
         for i, k in enumerate(z["keys"]):
             store[str(k)] = {f: z[f][i] for f in z.files if f != "keys"}
     rename = {c: c[len(f"g{g}_"):] for c in df.columns if c.startswith(f"g{g}_")}
+    if "label" not in df:
+        df["label"] = ""
+    df["label"] = df["label"].fillna("")
     return df.rename(columns=rename), store
 
 
@@ -205,6 +214,8 @@ def prompt_dependence(df, out):
 def clipscore_relation(df, out):
     g = df[(df.corpus == "guidance") & df.clipscore.notna()]
     rows = []
+    if len(g) < 3:
+        return
     for s in ("pec", "ss", "rollout"):
         if f"{s}_gini" not in g:
             continue
@@ -348,7 +359,8 @@ def real_vs_generated(df, out):
         return
     rows = []
     for (ds, m, mo), grp in gen.groupby(["dataset", "model", "mode"]):
-        grp = grp.set_index("hf_row")
+        # multi-seed corpora: one value per prompt before pairing with its real image
+        grp = grp[grp.hf_row >= 0].groupby("hf_row").mean(numeric_only=True)
         idx = grp.index.intersection(real.index)
         for s in ("pec", "ss", "rollout"):
             res = paired(grp.loc[idx, f"{s}_gini"], real.loc[idx, f"{s}_gini"])
@@ -413,6 +425,186 @@ def detection(df, store, out):
     pd.DataFrame(rows).to_csv(f"{out}/detection.csv", index=False)
 
 
+UNC_SCORES = ["seed_jsd", "seed_mi", "seed_patch_var", "seed_peak_spread",
+              "seed_centroid_spread", "seed_gini_sd", "seed_sem_var"]
+
+
+def seed_uncertainty(df, store, g, out):
+    """Per prompt: spread of evidence maps across seeds (any corpus with >= 2 seeds)."""
+    multi = df[df.corpus.isin(["guidance", "consistency"]) & (df.seed >= 0)]
+    rows = []
+    for (c, ds, m, mo, gid), grp in multi.groupby(["corpus", "dataset", "model", "mode", "gid"]):
+        if grp.seed.nunique() < 2:
+            continue
+        r = dict(corpus=c, dataset=ds, model=m, mode=mo, gid=gid, n_seeds=grp.seed.nunique(),
+                 clipscore_mean=grp.clipscore.mean())
+        embs = np.stack([store[k]["clip_emb"] for k in grp.key])
+        for sig in ("pec", "ss"):
+            f = f"g{g}_{sig}"
+            if f in store[grp.key.iloc[0]]:
+                u = U.seed_uncertainty(np.stack([store[k][f] for k in grp.key]), embs)
+                r.update({f"{sig}_{k}": v for k, v in u.items() if np.isscalar(v)})
+        rows.append(r)
+    per = pd.DataFrame(rows)
+    if per.empty:
+        return per
+    per.to_csv(f"{out}/uncertainty_seed_perprompt.csv", index=False)
+    cols = [c for c in per.columns if any(c.endswith(u) for u in UNC_SCORES)]
+    per.groupby(["corpus", "dataset", "model", "mode"])[cols].mean().to_csv(
+        f"{out}/uncertainty_seed_by_mode.csv")
+    tests = []
+    for (c, ds, m), grp in per.groupby(["corpus", "dataset", "model"]):
+        for col in cols:
+            w = grp.pivot_table(index="gid", columns="mode", values=col)
+            for a, b in PAIRS:
+                if a in w and b in w:
+                    tests.append(dict(corpus=c, dataset=ds, model=m, score=col, a=a, b=b,
+                                      **paired(w[a], w[b])))
+    t = pd.DataFrame(tests)
+    if len(t):
+        t["p_holm"] = holm(t["p_wilcoxon"])
+        for _, r in t[t.score.isin(["pec_seed_jsd", "ss_seed_jsd", "pec_seed_sem_var"])].iterrows():
+            put(f"unc_{r.dataset}_{r.model}_{r.score}_{r.a}_vs_{r.b}_dz", r.dz)
+            put(f"unc_{r.dataset}_{r.model}_{r.score}_{r.a}_vs_{r.b}_p", r.p_holm)
+    t.to_csv(f"{out}/uncertainty_seed_tests.csv", index=False)
+    return per
+
+
+def trajectory(df, store, g, out):
+    tr = df[df.corpus == "trajectory"]
+    rows = []
+    for (ds, m, mo, gid, seed), grp in tr.groupby(["dataset", "model", "mode", "gid", "seed"]):
+        grp = grp.sort_values("step")
+        if len(grp) < 3:
+            continue
+        r = dict(dataset=ds, model=m, mode=mo, gid=gid, seed=seed, n_steps=len(grp))
+        for sig in ("pec", "ss"):
+            f = f"g{g}_{sig}"
+            if f in store[grp.key.iloc[0]]:
+                u = U.trajectory_uncertainty(np.stack([store[k][f] for k in grp.key]),
+                                             grp.step.to_numpy())
+                r.update({f"{sig}_{k}": v for k, v in u.items() if np.isscalar(v)})
+        rows.append(r)
+    per = pd.DataFrame(rows)
+    if per.empty:
+        return per
+    per.to_csv(f"{out}/uncertainty_trajectory.csv", index=False)
+    per.groupby(["dataset", "model", "mode"]).mean(numeric_only=True).to_csv(
+        f"{out}/uncertainty_trajectory_by_mode.csv")
+    return per
+
+
+def failure_prediction(seed_per, traj_per, correctness, out):
+    """Does uncertainty predict failed generations? Needs a correctness CSV with
+    dataset, model, mode, gid, seed, correct (0/1), e.g. from GenEval 2 / VQAScore."""
+    if not correctness or not os.path.exists(correctness):
+        return
+    cor = pd.read_csv(correctness)
+    keys = ["dataset", "model", "mode", "gid"]
+    per_prompt = cor.groupby(keys).correct.mean().rename("acc").reset_index()
+    rows = []
+    if seed_per is not None and len(seed_per):
+        d = seed_per.merge(per_prompt, on=keys)
+        d["failed"] = d.acc < 0.5
+        cands = [c for c in d.columns if any(c.endswith(u) for u in UNC_SCORES)]
+        d["neg_clipscore"] = -d.clipscore_mean
+        for c in cands + ["neg_clipscore"]:
+            _, _, aurc = U.coverage_curve(d[c].to_numpy(), 1 - d.failed.to_numpy())
+            rows.append(dict(level="prompt", score=c, n=len(d), fail_rate=d.failed.mean(),
+                             auroc=U.auroc(d[c].to_numpy(), d.failed.to_numpy()), aurc=aurc))
+    if traj_per is not None and len(traj_per):
+        d = traj_per.merge(cor, on=keys + ["seed"])
+        d["failed"] = d.correct < 0.5
+        for c in [c for c in d.columns if "traj_" in c]:
+            _, _, aurc = U.coverage_curve(d[c].to_numpy(), 1 - d.failed.to_numpy())
+            rows.append(dict(level="image", score=c, n=len(d), fail_rate=d.failed.mean(),
+                             auroc=U.auroc(d[c].to_numpy(), d.failed.to_numpy()), aurc=aurc))
+    t = pd.DataFrame(rows)
+    t.to_csv(f"{out}/failure_prediction.csv", index=False)
+    for _, r in t.iterrows():
+        put(f"fail_{r.level}_{r.score}_auroc", float(r.auroc))
+
+
+def external(df, store, out):
+    """Faces / memes / other sets: does evidence geometry differ by label?"""
+    ex = df[(df.corpus == "external") & (df.label != "")] if "label" in df else df.iloc[:0]
+    rows, det = [], []
+    for ds, grp in ex.groupby("dataset"):
+        labels = sorted(grp.label.unique())
+        for s in ("pec", "rollout", "ss"):
+            col = f"{s}_gini"
+            if col not in grp:
+                continue
+            for a, b in combinations(labels, 2):
+                x, y = grp.loc[grp.label == a, col].dropna(), grp.loc[grp.label == b, col].dropna()
+                if len(x) > 2 and len(y) > 2:
+                    u = stats.mannwhitneyu(x, y)
+                    rows.append(dict(dataset=ds, signal=s, a=a, b=b, n_a=len(x), n_b=len(y),
+                                     mean_a=x.mean(), mean_b=y.mean(),
+                                     auc=u.statistic / (len(x) * len(y)), p=u.pvalue))
+        ev_cols = [c for c in (f"{s}_{k}" for s in ("pec", "rollout", "ss")
+                               for k in ("gini", "entropy", "top10")) if c in grp] + ["clipscore"]
+        d = grp.dropna(subset=ev_cols)
+        if d.label.nunique() > 1 and d.gid.nunique() >= 5:
+            y, groups = d.label.to_numpy(), d.gid.to_numpy()
+            emb = np.stack([store[k]["clip_emb"] for k in d.key])
+            ev = d[ev_cols].to_numpy(float)
+            for feats, X in [("clip", emb), ("evidence", ev), ("clip+evidence", np.hstack([emb, ev]))]:
+                a, asd, f, fsd = classify(X, y, groups)
+                det.append(dict(dataset=ds, features=feats, n=len(d),
+                                chance=d.label.value_counts(normalize=True).max(),
+                                acc=a, acc_sd=asd, macro_f1=f, macro_f1_sd=fsd))
+    t = pd.DataFrame(rows)
+    if len(t):
+        t["p_holm"] = holm(t["p"])
+    t.to_csv(f"{out}/external_label_tests.csv", index=False)
+    pd.DataFrame(det).to_csv(f"{out}/external_detection.csv", index=False)
+
+
+def guidance_sweep(df, seed_per, out):
+    """Modern-model sweep (modes cfg<s>): is concentration / uncertainty monotone in s?
+
+    Per prompt we average over seeds, then fit  y ~ log(s) + C(prompt)  so the
+    slope uses within-prompt variation only, and report Spearman of the
+    per-scale means as a model-free check.
+    """
+    g = df[(df.corpus == "guidance") & df["mode"].str.match(r"^cfg[0-9.]+$")].copy()
+    if g.empty:
+        return
+    g["cfg"] = g["mode"].str[3:].astype(float)
+    rows = []
+    try:
+        import statsmodels.formula.api as smf
+    except ImportError:
+        smf = None
+    targets = [("pec_gini", g), ("ss_gini", g), ("rollout_gini", g), ("clipscore", g)]
+    if seed_per is not None and len(seed_per):
+        sp = seed_per[seed_per["mode"].str.match(r"^cfg[0-9.]+$")].copy()
+        sp["cfg"] = sp["mode"].str[3:].astype(float)
+        targets += [(c, sp) for c in ("pec_seed_jsd", "ss_seed_jsd", "pec_seed_sem_var") if c in sp]
+    for col, src in targets:
+        if col not in src:
+            continue
+        for (ds, m), grp in src.groupby(["dataset", "model"]):
+            per = grp.groupby(["gid", "cfg"])[col].mean().reset_index()
+            means = per.groupby("cfg")[col].mean()
+            if len(means) < 3:
+                continue
+            rho = stats.spearmanr(means.index, means.values).statistic
+            r = dict(dataset=ds, model=m, measure=col, n_prompts=per.gid.nunique(),
+                     n_scales=len(means), spearman_means=rho,
+                     **{f"mean_cfg{k:g}": v for k, v in means.items()})
+            if smf is not None and per.gid.nunique() > 2:
+                per["logcfg"] = np.log(per.cfg)
+                fit = smf.ols(f"{col} ~ logcfg + C(gid)", data=per).fit(cov_type="cluster",
+                                                                      cov_kwds={"groups": per.gid})
+                r.update(slope_logcfg=fit.params["logcfg"], p=fit.pvalues["logcfg"])
+                put(f"sweep_{ds}_{m}_{col}_slope", float(fit.params["logcfg"]))
+                put(f"sweep_{ds}_{m}_{col}_p", float(fit.pvalues["logcfg"]))
+            rows.append(r)
+    pd.DataFrame(rows).to_csv(f"{out}/guidance_sweep.csv", index=False)
+
+
 def write_numbers(out):
     clean = {k: (None if isinstance(v, float) and np.isnan(v) else v) for k, v in NUM.items()}
     with open(f"{out}/numbers.json", "w") as f:
@@ -428,6 +620,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run-dir", required=True)
     ap.add_argument("--grid", type=int, default=7)
+    ap.add_argument("--correctness", default="",
+                    help="CSV dataset,model,mode,gid,seed,correct for failure prediction")
     args = ap.parse_args()
     out = os.path.join(args.run_dir, "results")
     os.makedirs(out, exist_ok=True)
@@ -444,6 +638,11 @@ def main():
     stability(df, store, out)
     real_vs_generated(df, out)
     detection(df, store, out)
+    sp = seed_uncertainty(df, store, args.grid, out)
+    tp = trajectory(df, store, args.grid, out)
+    failure_prediction(sp, tp, args.correctness, out)
+    guidance_sweep(df, sp, out)
+    external(df, store, out)
     write_numbers(out)
     print(f"wrote {len(NUM)} numbers and {len(glob(out + '/*.csv'))} tables to {out}")
 
