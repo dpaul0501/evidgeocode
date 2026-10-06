@@ -11,25 +11,22 @@ The benchmark addresses a core question in generative model interpretability:
 
 ---
 
-## Key Findings
+## Status
 
-| # | Finding | Result |
-|---|---------|--------|
-| F1 | Guidance → Evidence Concentration | text > i2i > weak (Welch t, p < 0.001) |
-| F2 | Image-to-image most geometrically stable | Lowest semantic variance across seeds |
-| F3 | Concentration–Stability Duality | Pearson r = −0.49 (p < 0.001) |
-| F4 | Generated ≠ Real | ΔGini < 0 in 6 / 8 (model, mode) conditions |
+Results are being regenerated with the corrected pipeline in `evidgeo/` and `scripts/` (prompt-aware Grad-PEC, exact mass-preserving SpatialShap, full corpora, paired statistics). Numbers from earlier notebook runs are not reported here until they are reproduced by `scripts/analyze.py`.
 
 ---
 
 ## Repository Structure
 
 ```
-evidgeo/
-├── datagen_coco.py       # Sharded, resumable dataset generator
-├── eval_evidgeo.py       # Full analysis pipeline (Modules A–F)
-├── requirements.txt      # Python dependencies
-└── README.md
+evidgeo/                  # library: attribution maps, smoothing, metrics, data discovery
+scripts/run_eval.py       # resumable per-image extraction (all corpora)
+scripts/analyze.py        # tables + numbers.tex for the paper
+notebooks/EvidGeo_full_eval.ipynb   # Colab driver for the full run
+tests/                    # unit tests (CPU, no downloads except CLIP for smoke runs)
+datagen_coco.py           # generator for multiguide_coco_v2
+eval_evidgeo.py           # original analysis script (superseded; kept for reference)
 ```
 
 ---
@@ -38,18 +35,20 @@ evidgeo/
 
 Images are generated from the **[Erland/coco_captions_small](https://huggingface.co/datasets/Erland/coco_captions_small)** HuggingFace dataset using two Stable Diffusion checkpoints and three guidance modes.
 
-| Dimension | Values |
-|-----------|--------|
-| Models    | SD 1.4 (`CompVis/stable-diffusion-v1-4`), SD 1.5 (`runwayml/stable-diffusion-v1-5`) |
-| Modes     | `weak` (CFG=1.0), `text` (CFG=7.5), `i2i` (CFG=7.5, strength=0.5) |
-| Images    | 3 750 per model×mode → **22 500 total** |
-| Resolution | 256×256 |
+| Corpus | Contents |
+|--------|----------|
+| v2 guidance | SD 1.4, SD 1.5 × {weak, text, i2i}; BigGAN-deep-256 × {weak, text}; 3,750 captions (some shards missing, ~27.4k images) |
+| v3 guidance | same models/modes on 1,249 further captions (~10k images) |
+| consistency | 150 prompts × 3 seeds × 3 modes (1,350 images) |
+| real | the paired COCO image for every caption (HF rows, shuffle seed 42) |
+
+SD settings (v2): 512×512, 50 PNDM steps, CFG 7.5 for text and i2i, i2i strength 0.75. BigGAN "text" = truncation 0.4, "weak" = truncation 1.0 (BigGAN is class-conditional, so this is a proxy).
 
 ### Guidance Mode Definitions
 
-- **weak** — Minimal semantic conditioning; prompt = `"a photo"`, CFG = 1.0. Serves as the near-unconditional baseline.
+- **weak** — Generic prompt `"a photo"` at CFG = 4.0 (caption-free conditioning baseline).
 - **text** — Full text-guided synthesis from the COCO caption at CFG = 7.5.
-- **i2i** — Image-to-image conditioning: COCO source image denoised at strength = 0.5 with the caption as text prompt.
+- **i2i** — Image-to-image conditioning: COCO source image denoised at strength = 0.75 with the caption as text prompt.
 
 ---
 

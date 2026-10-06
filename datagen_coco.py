@@ -3,10 +3,14 @@ datagen_coco.py
 ================
 Sharded, resumable dataset generator for the EvidGeo benchmark.
 
-Generates 22,500 images across 3 guidance modes × 2 SD models from COCO captions:
-  - weak   : minimal-guidance text-to-image  (CFG = 1.0, prompt = "a photo")
+Generates 22,500 images across 3 guidance modes × 2 SD models from COCO captions.
+Settings below are the ones that produced multiguide_coco_v2 (verified against
+its meta/*.jsonl records); the earlier v1 pilot used 256px / 30 steps / CFG 1.0
+/ strength 0.5 and had a prompt-truncation bug.
+  - weak   : generic-prompt text-to-image    (CFG = 4.0, prompt = "a photo")
   - text   : full text-conditioned           (CFG = 7.5, COCO caption)
-  - image  : image-to-image conditioned      (CFG = 7.5, strength = 0.5)
+  - i2i    : image-to-image conditioned      (CFG = 7.5, strength = 0.75, COCO caption)
+  50 PNDM steps (scheduler default), 512 x 512.
 
 Models: SD 1.4 (CompVis/stable-diffusion-v1-4)
         SD 1.5 (runwayml/stable-diffusion-v1-5)
@@ -49,15 +53,15 @@ class Cfg:
     BASE: str = "/content/drive/MyDrive/multiguide_coco_v2"
 
     # Image generation
-    IMG_SIZE: int = 256
-    STEPS: int = 30
+    IMG_SIZE: int = 512
+    STEPS: int = 50
 
     # Guidance modes
     PROMPT_WEAK: str = "a photo"
-    CFG_WEAK: float = 1.0
+    CFG_WEAK: float = 4.0
     CFG_TEXT: float = 7.5
     CFG_I2I: float = 7.5
-    I2I_STRENGTH: float = 0.5
+    I2I_STRENGTH: float = 0.75
 
     # Dataset scale
     N_PER_MODEL_PER_MODE: int = 3750   # → 7 500 per mode across 2 models

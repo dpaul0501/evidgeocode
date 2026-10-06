@@ -1,0 +1,11 @@
+# drafts and review material: keep out of the public code repo
+ieee_tai_paper/
+BMVC2026_rebuttal_1146/
+*.zip
+rebuttal_1146.*
+IEEE_TAI_EvidenceGeometry_preview.pdf
+zicdgrRr
+
+__pycache__/
+*.pyc
+.pytest_cache/
