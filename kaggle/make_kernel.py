@@ -33,8 +33,9 @@ os.makedirs(out, exist_ok=True)
 code = f'''
 import os, subprocess, sys
 def sh(c):
+    # tee everything into run.log so timings survive in the kernel output
     print("+", c, flush=True)
-    subprocess.run(c, shell=True, check=True)
+    subprocess.run(["bash", "-o", "pipefail", "-c", f"({{c}}) 2>&1 | tee -a /kaggle/working/run.log"], check=True)
 sh("git clone --depth 1 -b {a.branch} https://github.com/dpaul0501/evidgeocode.git /kaggle/working/repo")
 os.chdir("/kaggle/working/repo")
 sh("pip -q install -U 'diffusers>=0.37.1' transformers accelerate sentencepiece protobuf pyarrow statsmodels datasets")
