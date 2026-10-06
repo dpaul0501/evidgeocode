@@ -7,6 +7,10 @@
     kaggle kernels status dpaul93/evidgeo-sd35m-s0
     kaggle kernels output dpaul93/evidgeo-sd35m-s0 -p ./kaggle_out/evidgeo-sd35m-s0
 
+If HF_TOKEN is set in the local environment when this script runs, it is
+written into the (private, gitignored) kernel build so gated models download;
+otherwise the kernel looks for a Kaggle secret named HF_TOKEN.
+
 The kernel clones the public repo, fetches the master caption manifest from
 the repo's data/ folder, generates into /kaggle/working/gen, then runs
 run_eval.py on those images so the (small) feature files come back with the
@@ -38,7 +42,11 @@ def sh(c):
     subprocess.run(["bash", "-o", "pipefail", "-c", f"({{c}}) 2>&1 | tee -a /kaggle/working/run.log"], check=True)
 sh("git clone --depth 1 -b {a.branch} https://github.com/dpaul0501/evidgeocode.git /kaggle/working/repo")
 os.chdir("/kaggle/working/repo")
+# Kaggle's preinstalled torchao is older than diffusers expects and breaks its imports; not needed here
+sh("pip -q uninstall -y torchao || true")
 sh("pip -q install -U 'diffusers>=0.37.1' transformers accelerate sentencepiece protobuf pyarrow statsmodels datasets")
+sh("python -c 'import diffusers, transformers, torch; print(\\"versions:\\", diffusers.__version__, transformers.__version__, torch.__version__)'")
+{"os.environ.setdefault('HF_TOKEN', " + repr(os.environ['HF_TOKEN']) + ")" if os.environ.get("HF_TOKEN") else "# HF_TOKEN not injected at build time"}
 if os.environ.get("HF_TOKEN") is None:
     try:
         from kaggle_secrets import UserSecretsClient
