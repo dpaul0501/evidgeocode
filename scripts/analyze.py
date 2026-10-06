@@ -64,8 +64,10 @@ def boot_ci(x: np.ndarray, n: int = 2000, seed: int = 0) -> tuple[float, float]:
 def paired(a: pd.Series, b: pd.Series) -> dict:
     d = (a - b).dropna()
     n = len(d)
-    if n < 3:
-        return dict(n=n)
+    if n < 3:  # too few pairs to test; keep the columns so downstream code is uniform
+        nan = float("nan")
+        return dict(n=n, mean_a=nan, mean_b=nan, diff=float(d.mean()) if n else nan, dz=nan,
+                    t=nan, p_t=nan, p_wilcoxon=nan, frac_pos=nan)
     t = stats.ttest_1samp(d, 0.0)
     w = stats.wilcoxon(d) if np.any(d != 0) else None
     return dict(n=n, mean_a=float(a[d.index].mean()), mean_b=float(b[d.index].mean()),
@@ -412,6 +414,8 @@ def detection(df, store, out):
             continue
         y = d[target].to_numpy()
         groups = d.hf_row.to_numpy()
+        if len(set(groups)) < 5:  # GroupKFold(5) needs at least 5 prompts
+            continue
         emb = np.stack([store[k]["clip_emb"] for k in d.key])
         ev = d[ev_cols].to_numpy(float)
         chance = d[target].value_counts(normalize=True).max()
