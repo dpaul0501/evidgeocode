@@ -85,7 +85,17 @@ class Generator:
         self.pipe.set_progress_bar_config(disable=True)
         self.i2i = None
         if spec.i2i:
-            self.i2i = getattr(diffusers, spec.i2i).from_pipe(self.pipe)
+            # Build from the same modules rather than from_pipe(), which calls .to() and
+            # would pull a multi-GPU (device_map) pipeline back onto one device.
+            import inspect
+
+            i2i_cls = getattr(diffusers, spec.i2i)
+            params = inspect.signature(i2i_cls.__init__).parameters
+            self.i2i = i2i_cls(**{k: v for k, v in self.pipe.components.items() if k in params})
+            if getattr(self.pipe, "hf_device_map", None):
+                self.i2i.hf_device_map = self.pipe.hf_device_map
+            elif offload:
+                self.i2i.enable_model_cpu_offload()
             self.i2i.set_progress_bar_config(disable=True)
 
     # ------------------------------------------------------------ decoding

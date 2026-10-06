@@ -36,6 +36,7 @@ out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "build", a.name)
 os.makedirs(out, exist_ok=True)
 code = f'''
 import os, subprocess, sys
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 def sh(c):
     # tee everything into run.log so timings survive in the kernel output
     print("+", c, flush=True)
