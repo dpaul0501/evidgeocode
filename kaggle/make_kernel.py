@@ -63,7 +63,7 @@ sh(f"python scripts/generate_modern.py --model {a.model} --master-manifest {{M}}
 sh(f"python scripts/run_eval.py --guidance-roots {{G}} --trajectory-roots {{G}} --master-manifest {{M}} "
    f"--real --out /kaggle/working/eval --device cuda {a.eval_args}")
 sh("python scripts/analyze.py --run-dir /kaggle/working/eval")
-{"sh(f'cd /kaggle/working && zip -qr images.zip {{os.path.basename(G)}}')" if a.keep_images else ""}
+{"sh('cd /kaggle/working && zip -qr images.zip ' + os.path.basename(G))" if a.keep_images else ""}
 sh(f"rm -rf {{G}}/images {{G}}/traj /kaggle/working/eval/real_cache /kaggle/working/repo")
 '''
 with open(os.path.join(out, "kernel.py"), "w") as f:
