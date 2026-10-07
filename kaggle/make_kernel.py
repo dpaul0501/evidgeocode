@@ -28,6 +28,9 @@ ap.add_argument("--model", required=True)
 ap.add_argument("--gen-args", default="")
 ap.add_argument("--eval-args", default="--grids 7 --faith-per-bucket 0")
 ap.add_argument("--keep-images", action="store_true", help="zip images into the output")
+ap.add_argument("--dataset", default="",
+                help="generation folder name = dataset name in the analysis; give all shards of one "
+                     "run the same value so their outputs merge (default: gen_<kernel name>)")
 ap.add_argument("--branch", default="main")
 ap.add_argument("--accelerator", default="", help="Kaggle machine_shape; empty = default GPU")
 a = ap.parse_args()
@@ -55,7 +58,7 @@ if os.environ.get("HF_TOKEN") is None:
     except Exception as e:
         print("no HF_TOKEN secret (needed for gated models):", e)
 M = "data/manifest_master_N5000_seed42.jsonl"
-G = "/kaggle/working/gen_{a.name}"
+G = "/kaggle/working/{a.dataset or 'gen_' + a.name}"
 sh(f"python scripts/generate_modern.py --model {a.model} --master-manifest {{M}} --out {{G}} {a.gen_args}")
 sh(f"python scripts/run_eval.py --guidance-roots {{G}} --trajectory-roots {{G}} --master-manifest {{M}} "
    f"--real --out /kaggle/working/eval --device cuda {a.eval_args}")
