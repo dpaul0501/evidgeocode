@@ -63,6 +63,21 @@ def parse_args():
     return ap.parse_args()
 
 
+def save_retry(img, path, tries: int = 5):
+    """Save atomically, retrying: Drive FUSE mounts transiently report missing folders."""
+    for t in range(tries):
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".tmp.png"
+            img.save(tmp)
+            os.replace(tmp, path)
+            return
+        except OSError:
+            if t == tries - 1:
+                raise
+            time.sleep(2 * (t + 1))
+
+
 def jobs_for(args, spec):
     sweep = args.sweep if args.sweep is not None else spec.sweep
     modes = []
@@ -137,11 +152,9 @@ def main():
                 try:
                     img, traj = gen(prompt, guidance, seed, init=init, strength=args.strength,
                                     traj_every=args.traj_every if traj_dir else 0)
-                    tmp = path + ".tmp.png"
-                    img.save(tmp)
-                    os.replace(tmp, path)
+                    save_retry(img, path)
                     for step, im in traj:
-                        im.save(os.path.join(traj_dir, f"{gid:05d}_seed{k}_step{step:03d}.png"))
+                        save_retry(im, os.path.join(traj_dir, f"{gid:05d}_seed{k}_step{step:03d}.png"))
                     rec["traj_steps"] = [s for s, _ in traj]
                 except torch.cuda.OutOfMemoryError as e:
                     rec["error"] = f"OOM: {e}"

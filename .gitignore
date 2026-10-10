@@ -13,3 +13,4 @@ __pycache__/
 # local Kaggle kernel builds and outputs
 kaggle/build/
 kaggle_out/
+results_main/*.tgz
