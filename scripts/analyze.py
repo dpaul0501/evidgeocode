@@ -609,6 +609,67 @@ def guidance_sweep(df, seed_per, out):
     pd.DataFrame(rows).to_csv(f"{out}/guidance_sweep.csv", index=False)
 
 
+def mask_grid(path: str, g: int) -> np.ndarray:
+    """Fraction of each of the g x g patches covered by the (white) mask."""
+    from PIL import Image
+
+    m = np.asarray(Image.open(path).convert("L").resize((g * 32, g * 32)), dtype=float) / 255.0
+    return m.reshape(g, 32, g, 32).mean(axis=(1, 3))
+
+
+def mask_evidence(df, store, g, gen_roots, out):
+    """Inpainting / editing: share of evidence inside the changed region vs its area.
+
+    ratio > 1 means the map concentrates on the region the task changed. For
+    MagicBrush the human target and the unedited source are scored against the
+    same mask as references.
+    """
+    roots = {os.path.basename(os.path.normpath(r)): r for r in gen_roots}
+    rows = []
+    for _, r in df[df.corpus == "guidance"].iterrows():
+        root = roots.get(r.dataset)
+        if root is None:
+            continue
+        if r["mode"].startswith("inpaint"):
+            mp = os.path.join(root, "masks", f"{int(r.gid):05d}_{r['mode']}.png")
+        elif r["mode"].startswith("edit") or r.model == "magicbrush":
+            mp = os.path.join(root, "masks", f"{int(r.gid):05d}_edit.png")
+        else:
+            continue
+        if not os.path.exists(mp) or r.key not in store:
+            continue
+        cov = mask_grid(mp, g)
+        area = float(cov.mean())
+        row = dict(dataset=r.dataset, model=r.model, mode=r["mode"], gid=r.gid, seed=r.seed, area=area)
+        for sig in ("pec", "rollout", "loo", "ss"):
+            f = f"g{g}_{sig}"
+            if f in store[r.key]:
+                p = M.normalize(store[r.key][f]).reshape(g, g)
+                row[f"{sig}_in"] = float((p * cov).sum())
+                row[f"{sig}_ratio"] = row[f"{sig}_in"] / max(area, 1e-9)
+        rows.append(row)
+    per = pd.DataFrame(rows)
+    if per.empty:
+        return
+    per.to_csv(f"{out}/mask_evidence_perimage.csv", index=False)
+    summ = []
+    for (ds, m, mo), grp in per.groupby(["dataset", "model", "mode"]):
+        r = dict(dataset=ds, model=m, mode=mo, n=len(grp), area=grp.area.mean())
+        for sig in ("pec", "rollout", "loo", "ss"):
+            if f"{sig}_in" in grp:
+                d = grp[f"{sig}_in"] - grp.area
+                w = stats.wilcoxon(d) if len(d) > 2 and np.any(d != 0) else None
+                r.update({f"{sig}_in": grp[f"{sig}_in"].mean(), f"{sig}_ratio": grp[f"{sig}_ratio"].mean(),
+                          f"{sig}_p": float(w.pvalue) if w else np.nan})
+                put(f"mask_{ds}_{m}_{mo}_{sig}_ratio", float(grp[f"{sig}_ratio"].mean()))
+        summ.append(r)
+    t = pd.DataFrame(summ)
+    for sig in ("pec", "rollout", "loo", "ss"):
+        if f"{sig}_p" in t:
+            t[f"{sig}_p_holm"] = holm(t[f"{sig}_p"])
+    t.to_csv(f"{out}/mask_evidence.csv", index=False)
+
+
 def write_numbers(out):
     clean = {k: (None if isinstance(v, float) and np.isnan(v) else v) for k, v in NUM.items()}
     with open(f"{out}/numbers.json", "w") as f:
@@ -624,6 +685,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run-dir", required=True)
     ap.add_argument("--grid", type=int, default=7)
+    ap.add_argument("--gen-roots", nargs="*", default=[],
+                    help="Generation folders with masks/ (inpainting, MagicBrush editing)")
     ap.add_argument("--correctness", default="",
                     help="CSV dataset,model,mode,gid,seed,correct for failure prediction")
     args = ap.parse_args()
@@ -647,6 +710,7 @@ def main():
     failure_prediction(sp, tp, args.correctness, out)
     guidance_sweep(df, sp, out)
     external(df, store, out)
+    mask_evidence(df, store, args.grid, args.gen_roots, out)
     write_numbers(out)
     print(f"wrote {len(NUM)} numbers and {len(glob(out + '/*.csv'))} tables to {out}")
 

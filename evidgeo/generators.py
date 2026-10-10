@@ -41,6 +41,8 @@ class Spec:
     license: str
     vram_gb: int
     extra: dict = field(default_factory=dict)
+    inpaint: str | None = None      # diffusers inpainting pipeline (shares weights)
+    edit_via_image: bool = False    # t2i pipeline accepts image= as edit conditioning
 
     @property
     def has_i2i(self) -> bool:
@@ -50,15 +52,17 @@ class Spec:
 MODELS = {s.name: s for s in [
     Spec("sd35-medium", "stabilityai/stable-diffusion-3.5-medium", "StableDiffusion3Pipeline",
          "StableDiffusion3Img2ImgPipeline", "guidance_scale", 4.5, (1, 2, 3.5, 5, 7, 9), 28,
-         "0.31.0", "Stability Community (gated: accept terms, set HF_TOKEN)", 16),
+         "0.31.0", "Stability Community (gated: accept terms, set HF_TOKEN)", 16,
+         inpaint="StableDiffusion3InpaintPipeline"),
     Spec("sd35-large", "stabilityai/stable-diffusion-3.5-large", "StableDiffusion3Pipeline",
          "StableDiffusion3Img2ImgPipeline", "guidance_scale", 4.0, (1, 2, 3.5, 5, 7, 9), 28,
-         "0.31.0", "Stability Community (gated)", 32),
+         "0.31.0", "Stability Community (gated)", 32, inpaint="StableDiffusion3InpaintPipeline"),
     Spec("flux2-klein-base", "black-forest-labs/FLUX.2-klein-base-4B", "Flux2KleinPipeline",
-         None, "guidance_scale", 4.0, (1, 2, 4, 6, 8), 28, "0.37.1", "Apache-2.0", 16),
+         None, "guidance_scale", 4.0, (1, 2, 4, 6, 8), 28, "0.37.1", "Apache-2.0", 16,
+         inpaint="Flux2KleinInpaintPipeline", edit_via_image=True),
     Spec("qwen-image", "Qwen/Qwen-Image", "QwenImagePipeline", "QwenImageImg2ImgPipeline",
          "true_cfg_scale", 4.0, (1, 2, 4, 6), 30, "0.35.0", "Apache-2.0", 80,
-         extra={"negative_prompt": " "}),
+         extra={"negative_prompt": " "}, inpaint="QwenImageInpaintPipeline"),
 ]}
 
 
@@ -86,20 +90,25 @@ class Generator:
         if hasattr(self.pipe.vae, "enable_tiling"):
             # i2i encodes the source photo; without tiling this needs a ~4.5 GB block (OOM on T4)
             self.pipe.vae.enable_tiling()
-        self.i2i = None
-        if spec.i2i:
-            # Build from the same modules rather than from_pipe(), which calls .to() and
-            # would pull a multi-GPU (device_map) pipeline back onto one device.
-            import inspect
+        self.i2i = self._derive(spec.i2i, offload) if spec.i2i else None
+        self.inpaint = self._derive(spec.inpaint, offload) if spec.inpaint else None
 
-            i2i_cls = getattr(diffusers, spec.i2i)
-            params = inspect.signature(i2i_cls.__init__).parameters
-            self.i2i = i2i_cls(**{k: v for k, v in self.pipe.components.items() if k in params})
-            if getattr(self.pipe, "hf_device_map", None):
-                self.i2i.hf_device_map = self.pipe.hf_device_map
-            elif offload:
-                self.i2i.enable_model_cpu_offload()
-            self.i2i.set_progress_bar_config(disable=True)
+    def _derive(self, cls_name: str, offload: bool):
+        """Another pipeline on the same modules. Not from_pipe(): that calls .to() and
+        would pull a multi-GPU (device_map) pipeline back onto one device."""
+        import inspect
+
+        import diffusers
+
+        cls = getattr(diffusers, cls_name)
+        params = inspect.signature(cls.__init__).parameters
+        p = cls(**{k: v for k, v in self.pipe.components.items() if k in params})
+        if getattr(self.pipe, "hf_device_map", None):
+            p.hf_device_map = self.pipe.hf_device_map
+        elif offload:
+            p.enable_model_cpu_offload()
+        p.set_progress_bar_config(disable=True)
+        return p
 
     # ------------------------------------------------------------ decoding
     @torch.no_grad()
@@ -130,10 +139,20 @@ class Generator:
 
     # ------------------------------------------------------------- calling
     def __call__(self, prompt: str, guidance: float, seed: int, init: Image.Image | None = None,
-                 strength: float = 0.75, traj_every: int = 0):
-        pipe = self.i2i if init is not None else self.pipe
-        if init is not None and pipe is None:
-            raise ValueError(f"{self.spec.name} has no img2img pipeline")
+                 strength: float = 0.75, traj_every: int = 0, mask: Image.Image | None = None,
+                 edit: Image.Image | None = None):
+        """init -> img2img (SDEdit); init + mask -> inpainting (white = regenerate);
+        edit -> instruction editing with the image as conditioning (FLUX.2)."""
+        if mask is not None:
+            pipe = self.inpaint
+        elif init is not None:
+            pipe = self.i2i
+        else:
+            pipe = self.pipe
+        if pipe is None:
+            raise ValueError(f"{self.spec.name} lacks the pipeline for this task")
+        if edit is not None and not self.spec.edit_via_image:
+            raise ValueError(f"{self.spec.name} does not support image editing")
         traj, state = [], {"prev": None, "last": 0}
 
         def cb(p, i, t, kw):
@@ -154,10 +173,15 @@ class Generator:
                       callback_on_step_end=cb, callback_on_step_end_tensor_inputs=["latents"])
         kwargs[self.spec.guidance_param] = guidance
         kwargs.update(self.spec.extra)
-        if init is not None:
+        if mask is not None:
+            kwargs.update(image=init, mask_image=mask, strength=strength,
+                          height=self.size, width=self.size)
+        elif init is not None:
             kwargs.update(image=init, strength=strength)
         else:
             kwargs.update(height=self.size, width=self.size)
+            if edit is not None:
+                kwargs.update(image=edit)
         image = pipe(**kwargs).images[0]
         if traj_every:
             traj.append((state["last"], image))  # i2i runs fewer steps than self.steps

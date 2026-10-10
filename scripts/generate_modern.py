@@ -25,7 +25,9 @@ import shutil
 import sys
 import time
 
+import numpy as np
 import torch
+from PIL import Image, ImageDraw
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from evidgeo import data as D  # noqa: E402
@@ -42,7 +44,12 @@ def parse_args():
     ap.add_argument("--first-gid", type=int, default=0)
     ap.add_argument("--n-prompts", type=int, default=1000)
     ap.add_argument("--seeds", type=int, default=4)
+    ap.add_argument("--task", default="t2i", choices=["t2i", "edit"],
+                    help="t2i: COCO captions (modes sweep/generic/i2i/inpaint-center/inpaint-box); "
+                         "edit: MagicBrush instruction edits (modes edit-sweep)")
     ap.add_argument("--modes", nargs="+", default=["sweep", "generic", "i2i"])
+    ap.add_argument("--inpaint-strength", type=float, default=1.0,
+                    help="1.0 regenerates the masked region from noise")
     ap.add_argument("--sweep", type=float, nargs="*", default=None,
                     help="Guidance values; default is the model's own sweep")
     ap.add_argument("--strength", type=float, default=0.75)
@@ -91,9 +98,59 @@ def jobs_for(args, spec):
                 print(f"skipping i2i for {spec.name}")
                 continue
             modes.append(("i2i", spec.default_guidance, "caption"))
+        elif m in ("inpaint-center", "inpaint-box"):
+            if args.prompts_jsonl or not spec.inpaint:
+                print(f"skipping {m} for {spec.name}")
+                continue
+            modes.append((m, spec.default_guidance, "caption"))
+        elif m == "edit-sweep":
+            if not spec.edit_via_image:
+                raise ValueError(f"{spec.name} cannot edit")
+            modes += [(f"edit-cfg{g:g}", g, "caption") for g in sweep]
         else:
             raise ValueError(m)
     return modes
+
+
+def make_mask(kind: str, gid: int, size: int) -> Image.Image:
+    """White = regenerate. center: middle square, 25% of the area.
+    box: a rectangle covering 15-35% of the image, placed by a gid-seeded RNG."""
+    m = Image.new("L", (size, size), 0)
+    if kind == "inpaint-center":
+        a, b = size // 4, 3 * size // 4
+        box = (a, a, b, b)
+    else:
+        rng = np.random.default_rng(gid)
+        area = rng.uniform(0.15, 0.35) * size * size
+        ar = rng.uniform(0.6, 1.6)
+        w = int(min(size, (area * ar) ** 0.5))
+        h = int(min(size, area / max(w, 1)))
+        x, y = rng.integers(0, size - w + 1), rng.integers(0, size - h + 1)
+        box = (int(x), int(y), int(x + w), int(y + h))
+    ImageDraw.Draw(m).rectangle(box, fill=255)
+    return m
+
+
+def magicbrush_manifest(args):
+    """MagicBrush dev split: every row is one (source, mask, instruction, human target) edit."""
+    from datasets import load_dataset
+
+    ds = load_dataset("osunlp/MagicBrush", split="dev")
+    path = os.path.join(args.out, "cache", "manifest_prompts.jsonl")
+    with open(path, "w") as f:
+        for i, r in enumerate(ds):
+            f.write(json.dumps({"global_id": i, "caption": r["instruction"]}) + "\n")
+    # reference images live in the same layout so run_eval scores them as their own buckets
+    for i, r in enumerate(ds):
+        sz = (args.size, args.size)
+        for sub, img in (("magicbrush/source", r["source_img"]), ("magicbrush/human-target", r["target_img"])):
+            p = os.path.join(args.out, "images", sub, f"{i:05d}_seed0.png")
+            if not os.path.exists(p):
+                save_retry(img.convert("RGB").resize(sz), p)
+        mp = os.path.join(args.out, "masks", f"{i:05d}_edit.png")
+        if not os.path.exists(mp):
+            save_retry(r["mask_img"].convert("L").resize(sz), mp)
+    return ds, path
 
 
 def main():
@@ -103,12 +160,17 @@ def main():
     os.makedirs(os.path.join(args.out, "cache"), exist_ok=True)
     os.makedirs(os.path.join(args.out, "meta"), exist_ok=True)
 
-    src = args.prompts_jsonl or args.master_manifest
-    manifest = D.find_manifest("", src)
-    dst = os.path.join(args.out, "cache",
-                       "manifest_master.jsonl" if not args.prompts_jsonl else "manifest_prompts.jsonl")
-    if not os.path.exists(dst):
-        shutil.copy(src, dst)
+    edit_ds = None
+    if args.task == "edit":
+        edit_ds, src = magicbrush_manifest(args)
+        manifest = D.find_manifest("", src)
+    else:
+        src = args.prompts_jsonl or args.master_manifest
+        manifest = D.find_manifest("", src)
+        dst = os.path.join(args.out, "cache",
+                           "manifest_master.jsonl" if not args.prompts_jsonl else "manifest_prompts.jsonl")
+        if not os.path.exists(dst):
+            shutil.copy(src, dst)
     gids = [g for g in sorted(manifest)[args.first_gid:args.first_gid + args.n_prompts]]
     gids = gids[shard_i::shard_n]
     modes = jobs_for(args, spec)
@@ -116,7 +178,7 @@ def main():
           f"= {len(gids) * len(modes) * args.seeds} images")
 
     coco = None
-    if any(m[0] == "i2i" for m in modes):
+    if any(m[0] == "i2i" or m[0].startswith("inpaint") for m in modes):
         from datasets import load_dataset
 
         coco = load_dataset(args.hf_dataset, split=args.hf_split).shuffle(
@@ -142,16 +204,25 @@ def main():
                 if k == 0 and gids.index(gid) < args.traj_prompts:
                     traj_dir = os.path.join(args.out, "traj", spec.name, mode)
                     os.makedirs(traj_dir, exist_ok=True)
-                init = None
-                if mode == "i2i":
+                init = mask = edit = None
+                strength = args.strength
+                if mode == "i2i" or mode.startswith("inpaint"):
                     init = coco[gid]["image"].convert("RGB").resize((args.size, args.size))
+                if mode.startswith("inpaint"):
+                    mask = make_mask(mode, gid, args.size)
+                    mp = os.path.join(args.out, "masks", f"{gid:05d}_{mode}.png")
+                    if not os.path.exists(mp):
+                        save_retry(mask, mp)
+                    strength = args.inpaint_strength
+                if mode.startswith("edit"):
+                    edit = edit_ds[gid]["source_img"].convert("RGB").resize((args.size, args.size))
                 rec = dict(model=spec.name, repo=spec.repo, mode=mode, global_id=gid, seed=seed,
                            seed_index=k, prompt=prompt, guidance=guidance,
                            guidance_param=spec.guidance_param, steps=gen.steps, size=args.size,
-                           strength=args.strength if init is not None else None, path=path)
+                           strength=strength if init is not None else None, task=args.task, path=path)
                 try:
-                    img, traj = gen(prompt, guidance, seed, init=init, strength=args.strength,
-                                    traj_every=args.traj_every if traj_dir else 0)
+                    img, traj = gen(prompt, guidance, seed, init=init, strength=strength,
+                                    traj_every=args.traj_every if traj_dir else 0, mask=mask, edit=edit)
                     save_retry(img, path)
                     for step, im in traj:
                         save_retry(im, os.path.join(traj_dir, f"{gid:05d}_seed{k}_step{step:03d}.png"))
