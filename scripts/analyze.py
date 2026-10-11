@@ -572,10 +572,10 @@ def guidance_sweep(df, seed_per, out, traj_per=None):
     slope uses within-prompt variation only, and report Spearman of the
     per-scale means as a model-free check.
     """
-    g = df[(df.corpus == "guidance") & df["mode"].str.match(r"^cfg[0-9.]+$")].copy()
+    g = df[(df.corpus == "guidance") & df["mode"].str.match(r"^(edit-)?cfg[0-9.]+$")].copy()
     if g.empty:
         return
-    g["cfg"] = g["mode"].str[3:].astype(float)
+    g["cfg"] = g["mode"].str.extract(r"cfg([0-9.]+)$")[0].astype(float)
     rows = []
     try:
         import statsmodels.formula.api as smf
@@ -583,12 +583,12 @@ def guidance_sweep(df, seed_per, out, traj_per=None):
         smf = None
     targets = [("pec_gini", g), ("ss_gini", g), ("rollout_gini", g), ("clipscore", g)]
     if seed_per is not None and len(seed_per):
-        sp = seed_per[seed_per["mode"].str.match(r"^cfg[0-9.]+$")].copy()
-        sp["cfg"] = sp["mode"].str[3:].astype(float)
+        sp = seed_per[seed_per["mode"].str.match(r"^(edit-)?cfg[0-9.]+$")].copy()
+        sp["cfg"] = sp["mode"].str.extract(r"cfg([0-9.]+)$")[0].astype(float)
         targets += [(c, sp) for c in ("pec_seed_jsd", "ss_seed_jsd", "pec_seed_sem_var") if c in sp]
     if traj_per is not None and len(traj_per):
-        tp = traj_per[traj_per["mode"].str.match(r"^cfg[0-9.]+$")].copy()
-        tp["cfg"] = tp["mode"].str[3:].astype(float)
+        tp = traj_per[traj_per["mode"].str.match(r"^(edit-)?cfg[0-9.]+$")].copy()
+        tp["cfg"] = tp["mode"].str.extract(r"cfg([0-9.]+)$")[0].astype(float)
         targets += [(c, tp) for c in ("pec_traj_commit_frac", "ss_traj_commit_frac") if c in tp]
     for col, src in targets:
         if col not in src:
@@ -674,6 +674,53 @@ def mask_evidence(df, store, g, gen_roots, out):
     t.to_csv(f"{out}/mask_evidence.csv", index=False)
 
 
+def mask_control(df, store, g, gen_roots, out):
+    """Inpainting control: is evidence inside the mask higher for the inpainted image
+    than for the paired real photo and the i2i image under the *same* mask?
+    (A centred mask collects evidence anyway because photos are centre-biased.)"""
+    roots = {os.path.basename(os.path.normpath(r)): r for r in gen_roots}
+    real = df[df.corpus == "real"].set_index("hf_row")
+    rows = []
+    for ds, root in roots.items():
+        gen = df[(df.corpus == "guidance") & (df.dataset == ds)]
+        for kind in ("inpaint-center", "inpaint-box"):
+            for gid, grp in gen[gen["mode"] == kind].groupby("gid"):
+                mp = os.path.join(root, "masks", f"{int(gid):05d}_{kind}.png")
+                if not os.path.exists(mp):
+                    continue
+                cov = mask_grid(mp, g)
+                def inside(keys, sig):
+                    vals = [float((M.normalize(store[k][f"g{g}_{sig}"]).reshape(g, g) * cov).sum())
+                            for k in keys if k in store and f"g{g}_{sig}" in store[k]]
+                    return float(np.mean(vals)) if vals else np.nan
+                i2i = gen[(gen["mode"] == "i2i") & (gen.gid == gid)]
+                hr = grp.hf_row.iloc[0]
+                rk = [real.loc[hr, "key"]] if hr in real.index else []
+                for sig in ("pec", "rollout", "loo", "ss"):
+                    rows.append(dict(dataset=ds, mask=kind, gid=gid, signal=sig, area=float(cov.mean()),
+                                     inpaint=inside(grp.key, sig), i2i=inside(i2i.key, sig), real=inside(rk, sig)))
+    per = pd.DataFrame(rows)
+    if per.empty:
+        return
+    per.to_csv(f"{out}/mask_control_perimage.csv", index=False)
+    summ = []
+    for (ds, kind, sig), grp in per.groupby(["dataset", "mask", "signal"]):
+        r = dict(dataset=ds, mask=kind, signal=sig, n=len(grp), area=grp.area.mean(),
+                 inpaint=grp.inpaint.mean(), i2i=grp.i2i.mean(), real=grp.real.mean())
+        for ref in ("real", "i2i"):
+            res = paired(grp.inpaint, grp[ref])
+            r[f"vs_{ref}_dz"], r[f"vs_{ref}_p"] = res.get("dz", np.nan), res.get("p_wilcoxon", np.nan)
+        summ.append(r)
+    t = pd.DataFrame(summ)
+    for ref in ("real", "i2i"):
+        t[f"vs_{ref}_p_holm"] = holm(t[f"vs_{ref}_p"])
+    for _, r in t.iterrows():
+        k = f"maskctl_{r['mask']}_{r.signal}"
+        for col in ("area", "inpaint", "i2i", "real", "vs_real_dz", "vs_real_p_holm", "vs_i2i_dz", "vs_i2i_p_holm"):
+            put(f"{k}_{col.replace('_holm', '')}", float(r[col]))
+    t.to_csv(f"{out}/mask_control.csv", index=False)
+
+
 def write_numbers(out):
     clean = {k: (None if isinstance(v, float) and np.isnan(v) else v) for k, v in NUM.items()}
     with open(f"{out}/numbers.json", "w") as f:
@@ -715,6 +762,7 @@ def main():
     guidance_sweep(df, sp, out, tp)
     external(df, store, out)
     mask_evidence(df, store, args.grid, args.gen_roots, out)
+    mask_control(df, store, args.grid, args.gen_roots, out)
     write_numbers(out)
     print(f"wrote {len(NUM)} numbers and {len(glob(out + '/*.csv'))} tables to {out}")
 

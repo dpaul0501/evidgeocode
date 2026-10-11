@@ -130,9 +130,10 @@ def table(path, cols, header, rows, caption, label, star=False, size=None):
 
 MODEL = {"sd14": "SD~1.4", "sd15": "SD~1.5", "biggan": "BigGAN", "sd35-medium": "SD~3.5-M",
          "flux2-klein-base": "FLUX.2-klein", "qwen-image": "Qwen-Image", "sd": "SD (cons.)",
-         "coco": "COCO (real)", "magicbrush": "MagicBrush"}
+         "coco": "COCO (real)", "magicbrush": "MagicBrush (ref.)"}
 DS = {"multiguide_coco_v2": "v2", "multiguide_coco_v3": "v3", "multiguide_consistency": "stab.",
-      "Erland__coco_captions_small": "real", "kaggle_sd35m": "ext.", "coco": "ext."}
+      "Erland__coco_captions_small": "real", "kaggle_sd35m": "ext.", "coco": "ext.",
+      "inpaint": "inpaint", "edit": "edit", "faces": "faces"}
 
 
 def t_corpus(runs, tdir):
@@ -149,7 +150,8 @@ def t_corpus(runs, tdir):
     total = sum(int(r[-1].replace("{,}", "")) for r in rows)
     rows.append([r"\textbf{Total}", "", "", "", rf"\textbf{{{total:,}}}".replace(",", "{,}")])
     table(f"{tdir}/corpus.tex", "lllp{4.2cm}r", "Corpus & Split & Generator & Conditions & Images",
-          rows, "EvidGeo composition. Every generated image is paired with the real COCO photograph of its caption.",
+          rows, "EvidGeo composition. COCO-caption generations are paired with the real photograph of their caption; "
+          "trajectory rows are intermediate $\\hat x_0$ previews, counted separately from final images.",
           "tab:corpus", star=True)
 
 
@@ -172,7 +174,9 @@ def t_guidance(runs, tdir):
 
 def t_sweep(runs, tdir):
     rows = []
-    for name in ("sd35", "klein", "qwen"):
+    task = {"sd35": "T2I (COCO)", "klein": "T2I (COCO)", "qwen": "T2I (COCO)",
+            "edit": "Editing (MagicBrush)", "faces": "T2I (faces)"}
+    for name in ("sd35", "klein", "qwen", "edit", "faces"):
         d = read(runs, name, "guidance_sweep.csv")
         if d is None:
             continue
@@ -180,10 +184,10 @@ def t_sweep(runs, tdir):
                                       "pec_seed_sem_var", "pec_seed_jsd"])].iterrows():
             means = {k[8:]: r[k] for k in d.columns if k.startswith("mean_cfg") and not pd.isna(r[k])}
             seq = r" $\to$ ".join(f3(v) for _, v in sorted(means.items(), key=lambda kv: float(kv[0])))
-            rows.append([MODEL.get(r.model, esc(r.model)), esc(r.measure), ", ".join(sorted(means, key=float)),
-                         seq, f3(r.slope_logcfg, 4), fp(r.p)])
-    table(f"{tdir}/sweep.tex", "llllrr",
-          r"Model & Measure & Guidance $s$ & Mean per $s$ & Slope ($\log s$) & $p$", rows,
+            rows.append([task[name], MODEL.get(r.model, esc(r.model)), esc(r.measure),
+                         ", ".join(sorted(means, key=float)), seq, f3(r.slope_logcfg, 4), fp(r.p)])
+    table(f"{tdir}/sweep.tex", "lllllrr",
+          r"Task & Model & Measure & Guidance $s$ & Mean per $s$ & Slope ($\log s$) & $p$", rows,
           r"Guidance sweeps on current models. Slopes from $y\sim\log s+\text{prompt}$ fixed effects, "
           r"prompt-clustered errors.", "tab:sweep", star=True)
 
@@ -250,6 +254,22 @@ def t_masks(runs, tdir):
           "tab:masks")
 
 
+def t_maskctl(runs, tdir):
+    d = read(runs, "inpaint", "mask_control.csv")
+    rows = []
+    if d is not None:
+        for _, r in d.iterrows():
+            rows.append([esc(r["mask"]), esc(r.signal), str(int(r.n)), f3(r.area), f3(r.inpaint), f3(r.i2i),
+                         f3(r.real), f3(r.vs_real_dz, 2), fp(r.vs_real_p_holm), f3(r.vs_i2i_dz, 2),
+                         fp(r.vs_i2i_p_holm)])
+    table(f"{tdir}/maskctl.tex", "llrrrrrrrrr",
+          r"Mask & Map & $n$ & Area & Inpainted & i2i & Real & \multicolumn{2}{c}{vs.\ real} & "
+          r"\multicolumn{2}{c}{vs.\ i2i} \\ & & & & & & & $d_z$ & $p$ & $d_z$ & $p$",
+          rows, "Share of evidence inside the inpainting mask for the inpainted image and, under the same "
+                "mask, the i2i image and the real photograph (SD~3.5, 150 captions; generated values "
+                "averaged over 3 seeds). Paired by caption, Holm-corrected.", "tab:maskctl", star=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
@@ -259,7 +279,7 @@ def main():
     os.makedirs(os.path.join(a.out, "tables"), exist_ok=True)
     n = write_numbers(runs, a.out)
     td = os.path.join(a.out, "tables")
-    for fn in (t_corpus, t_guidance, t_sweep, t_stability, t_faith, t_detection, t_realgen, t_masks):
+    for fn in (t_corpus, t_guidance, t_sweep, t_stability, t_faith, t_detection, t_realgen, t_masks, t_maskctl):
         fn(runs, td)
     print(f"{n} numbers, {len(os.listdir(td))} tables -> {a.out}")
 
