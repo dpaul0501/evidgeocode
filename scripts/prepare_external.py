@@ -9,8 +9,8 @@ Each output line: {"image": <path relative to the JSONL>, "text": ..., "label": 
   # MemeCap (memes_*.json + images); choose which text the evidence is measured against
   python scripts/prepare_external.py memecap --src /data/memecap --text interpretation --out ext/memecap.jsonl
 
-  # FaceCaption-15M from Hugging Face (streams N samples, saves images locally)
-  python scripts/prepare_external.py facecaption --n 5000 --out ext/facecaption.jsonl
+  # FaceCaption-15M attribute captions -> generation manifest (no real photos are downloaded)
+  python scripts/prepare_external.py facecaption --n 300 --out ext/faces_manifest.jsonl
 
   # Anything else: CSV with columns image,text[,label,group]
   python scripts/prepare_external.py csv --src my.csv --out ext/my.jsonl
@@ -84,18 +84,36 @@ def memecap(a):
 
 
 def facecaption(a):
-    from datasets import load_dataset
+    """FaceCaption-15M attribute captions only (CC-BY-4.0 text).
 
-    ds = load_dataset("OpenFace-CQUPT/FaceCaption-15M", split="train", streaming=True)
-    img_dir = os.path.join(os.path.dirname(os.path.abspath(a.out)), "facecaption_img")
-    os.makedirs(img_dir, exist_ok=True)
-    for i, r in enumerate(ds):
-        if i >= a.n:
+    The dataset stores web URLs of scraped photos of identifiable people, not
+    images, so we deliberately do not download real faces. The captions are
+    used as prompts for face generation (see --manifest-out); no real pairs.
+    """
+    import ast
+    import urllib.request
+
+    rows, off = [], 0
+    while len(rows) < a.n:
+        url = ("https://datasets-server.huggingface.co/rows?dataset=OpenFace-CQUPT/FaceCaption-15M"
+               f"&config=default&split=train&offset={off}&length=100")
+        with urllib.request.urlopen(url, timeout=60) as f:
+            batch = json.load(f)["rows"]
+        if not batch:
             break
-        path = os.path.join(img_dir, f"{i:06d}.jpg")
-        if not os.path.exists(path):
-            r["image"].convert("RGB").save(path, quality=95)
-        yield {"image": path, "text": r.get("caption") or "", "label": "real_face", "group": i}
+        for r in batch:
+            cap = r["row"]["caption"]
+            cap = ast.literal_eval(cap)[0] if isinstance(cap, str) and cap.startswith("[") else \
+                (cap[0] if isinstance(cap, list) else cap)
+            if cap:
+                rows.append(cap.strip())
+        off += 100
+    rows = rows[:a.n]
+    with open(a.manifest_out or a.out, "w") as f:
+        for i, cap in enumerate(rows):
+            f.write(json.dumps({"global_id": i, "caption": cap}) + "\n")
+    print(f"wrote {len(rows)} face captions to {a.manifest_out or a.out}")
+    return []
 
 
 def generic_csv(a):
@@ -114,10 +132,13 @@ def main():
     ap.add_argument("--text", default="interpretation", choices=["ocr", "caption", "interpretation"],
                     help="MemeCap: which text the image evidence is measured against")
     ap.add_argument("--n", type=int, default=5000)
+    ap.add_argument("--manifest-out", default="", help="facecaption: caption manifest for generate_modern.py")
     a = ap.parse_args()
     gen = {"hateful_memes": hateful_memes, "memecap": memecap, "facecaption": facecaption,
            "csv": generic_csv}[a.kind]
-    write(gen(a), a.out)
+    rows = gen(a)
+    if a.kind != "facecaption":
+        write(rows, a.out)
 
 
 if __name__ == "__main__":

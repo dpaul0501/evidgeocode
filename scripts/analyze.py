@@ -565,7 +565,7 @@ def external(df, store, out):
     pd.DataFrame(det).to_csv(f"{out}/external_detection.csv", index=False)
 
 
-def guidance_sweep(df, seed_per, out):
+def guidance_sweep(df, seed_per, out, traj_per=None):
     """Modern-model sweep (modes cfg<s>): is concentration / uncertainty monotone in s?
 
     Per prompt we average over seeds, then fit  y ~ log(s) + C(prompt)  so the
@@ -586,6 +586,10 @@ def guidance_sweep(df, seed_per, out):
         sp = seed_per[seed_per["mode"].str.match(r"^cfg[0-9.]+$")].copy()
         sp["cfg"] = sp["mode"].str[3:].astype(float)
         targets += [(c, sp) for c in ("pec_seed_jsd", "ss_seed_jsd", "pec_seed_sem_var") if c in sp]
+    if traj_per is not None and len(traj_per):
+        tp = traj_per[traj_per["mode"].str.match(r"^cfg[0-9.]+$")].copy()
+        tp["cfg"] = tp["mode"].str[3:].astype(float)
+        targets += [(c, tp) for c in ("pec_traj_commit_frac", "ss_traj_commit_frac") if c in tp]
     for col, src in targets:
         if col not in src:
             continue
@@ -708,7 +712,7 @@ def main():
     sp = seed_uncertainty(df, store, args.grid, out)
     tp = trajectory(df, store, args.grid, out)
     failure_prediction(sp, tp, args.correctness, out)
-    guidance_sweep(df, sp, out)
+    guidance_sweep(df, sp, out, tp)
     external(df, store, out)
     mask_evidence(df, store, args.grid, args.gen_roots, out)
     write_numbers(out)

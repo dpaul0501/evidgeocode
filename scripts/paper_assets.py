@@ -49,7 +49,7 @@ def esc(s: str) -> str:
 
 
 def tex_value(v, key: str = "") -> str:
-    if key.endswith("_p") and isinstance(v, (int, float)) and not isinstance(v, bool):
+    if (key.endswith("_p") or key == "p") and isinstance(v, (int, float)) and not isinstance(v, bool):
         if v < 1e-10:
             return r"\ensuremath{<10^{-10}}"
         if v < 1e-3:
@@ -81,6 +81,27 @@ def write_numbers(runs: dict, out: str):
             continue
         for k, v in sorted(json.load(open(p)).items()):
             lines.append(rf"\expandafter\def\csname ev@{name}:{k}\endcsname{{{tex_value(v, k)}}}")
+    for name, d in runs.items():  # trajectory commitment vs guidance (per-prompt CSV)
+        tp = os.path.join(d, "uncertainty_trajectory.csv")
+        if not os.path.exists(tp):
+            continue
+        t = pd.read_csv(tp)
+        for mode, g in t.groupby("mode"):
+            for sig in ("pec", "ss"):
+                lines.append(rf"\expandafter\def\csname ev@{name}:traj_{mode}_{sig}_commit\endcsname"
+                             rf"{{{tex_value(float(g[f'{sig}_traj_commit_frac'].mean()))}}}")
+        lines.append(rf"\expandafter\def\csname ev@{name}:traj_n_prompts\endcsname{{{t.gid.nunique()}}}")
+        c = t[t["mode"].str.match(r"^cfg[0-9.]+$")].copy()
+        if c["mode"].nunique() >= 3:
+            import statsmodels.formula.api as smf
+
+            c["logcfg"] = np.log(c["mode"].str[3:].astype(float))
+            for sig in ("pec", "ss"):
+                fit = smf.ols(f"{sig}_traj_commit_frac ~ logcfg + C(gid)", data=c).fit(
+                    cov_type="cluster", cov_kwds={"groups": c.gid})
+                for k, v in (("slope", fit.params["logcfg"]), ("p", fit.pvalues["logcfg"])):
+                    lines.append(rf"\expandafter\def\csname ev@{name}:traj_{sig}_commit_{k}\endcsname"
+                                 rf"{{{tex_value(float(v), k if k == 'p' else '')}}}")
     for name, d in runs.items():  # derived values that only exist as CSVs
         a = os.path.join(d, "alpha_sweep.csv")
         if os.path.exists(a):
