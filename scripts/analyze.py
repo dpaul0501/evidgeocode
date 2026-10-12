@@ -108,6 +108,11 @@ def load(run: str, g: int):
         z = np.load(p)
         for i, k in enumerate(z["keys"]):
             store[str(k)] = {f: z[f][i] for f in z.files if f != "keys"}
+    ims = glob(f"{run}/imstats/*.parquet")
+    if ims:  # prompt-free image statistics (scripts/image_stats.py)
+        st = pd.concat([pd.read_parquet(p) for p in ims], ignore_index=True)
+        st = st.drop(columns=[c for c in ("error",) if c in st]).drop_duplicates("key")
+        df = df.merge(st, on="key", how="left")
     rename = {c: c[len(f"g{g}_"):] for c in df.columns if c.startswith(f"g{g}_")}
     if "label" not in df:
         df["label"] = ""
@@ -721,6 +726,80 @@ def mask_control(df, store, g, gen_roots, out):
     t.to_csv(f"{out}/mask_control.csv", index=False)
 
 
+IMSTATS = ["rms_contrast", "colourfulness", "hf_energy", "saturation", "edge_gini", "edge_centre"]
+
+
+def confound(df, out):
+    """Is the guidance effect on Grad-PEC concentration about the prompt, or just
+    about guided images being simpler? For each contrast/sweep report:
+      * the effect on Grad-PEC, prompt-free saliency (sal) and Sobel-edge Gini;
+      * the effect on the residual pec - sal (the prompt-specific part);
+      * the Grad-PEC effect before and after adding image statistics as
+        covariates, with caption fixed effects and caption-clustered errors.
+    """
+    try:
+        import statsmodels.formula.api as smf
+    except ImportError:
+        return
+    g = df[df.corpus == "guidance"].copy()
+    if "sal_gini" not in g or "pec_gini" not in g:
+        return
+    g["resid"] = g.pec_gini - g.sal_gini
+    covs = [c for c in IMSTATS if c in g and g[c].notna().any()]
+    rows = []
+
+    def fit(d, term, y, extra):
+        f = f"{y} ~ {term} + C(gid)" + "".join(f" + {c}" for c in extra)
+        m = smf.ols(f, data=d).fit(cov_type="cluster", cov_kwds={"groups": d.gid})
+        k = next(x for x in m.params.index if x.startswith(term.split("(")[0]) and x != "Intercept")
+        lo, hi = m.conf_int().loc[k]
+        return m.params[k], lo, hi, m.pvalues[k]
+
+    for (ds, model), grp in g.groupby(["dataset", "model"]):
+        modes = set(grp["mode"])
+        designs = []
+        if {"text", "weak"} <= modes:
+            designs.append(("text_vs_weak", grp[grp["mode"].isin(["text", "weak"])].assign(
+                x=lambda d: (d["mode"] == "text").astype(float)), "x"))
+        sweep = grp[grp["mode"].str.match(r"^(edit-)?cfg[0-9.]+$")]
+        if sweep["mode"].nunique() >= 3:
+            sw = sweep.assign(x=np.log(sweep["mode"].str.extract(r"cfg([0-9.]+)$")[0].astype(float)))
+            designs.append(("logcfg", sw, "x"))
+            sw2 = sw[sw.x > 0]
+            if sw2["mode"].nunique() >= 2:
+                designs.append(("logcfg_s>=2", sw2, "x"))
+        for name, d, term in designs:
+            d = d.dropna(subset=["pec_gini", "sal_gini"])
+            if d.gid.nunique() < 5:
+                continue
+            r = dict(dataset=ds, model=model, design=name, n=len(d), n_prompts=d.gid.nunique())
+            for y in ("pec_gini", "sal_gini", "edge_gini", "resid"):
+                if y in d and d[y].notna().all():
+                    b, lo, hi, p = fit(d, term, y, [])
+                    r.update({f"{y}_b": b, f"{y}_lo": lo, f"{y}_hi": hi, f"{y}_p": p,
+                              f"{y}_std_b": b / d[y].std()})
+            dd = d.dropna(subset=covs) if covs else d
+            if covs and len(dd) > 10:
+                b0 = fit(dd, term, "pec_gini", [])[0]
+                b, lo, hi, p = fit(dd, term, "pec_gini", covs)
+                r.update(pec_adj_b=b, pec_adj_lo=lo, pec_adj_hi=hi, pec_adj_p=p,
+                         pec_adj_retained=b / b0 if b0 else np.nan)
+                br, lor, hir, pr = fit(dd, term, "resid", covs)
+                r.update(resid_adj_b=br, resid_adj_lo=lor, resid_adj_hi=hir, resid_adj_p=pr)
+            rows.append(r)
+    t = pd.DataFrame(rows)
+    if t.empty:
+        return
+    for col in [c for c in t.columns if c.endswith("_p")]:
+        t[col + "_holm"] = holm(t[col])
+    t.to_csv(f"{out}/confound.csv", index=False)
+    for _, r in t.iterrows():
+        k = f"conf_{r.dataset}_{r.model}_{r.design}"
+        for col in t.columns:
+            if col.endswith(("_b", "_lo", "_hi", "_p_holm", "_retained", "_std_b")) and not pd.isna(r[col]):
+                put(f"{k}_{col.replace('_holm', '')}", float(r[col]))
+
+
 def write_numbers(out):
     clean = {k: (None if isinstance(v, float) and np.isnan(v) else v) for k, v in NUM.items()}
     with open(f"{out}/numbers.json", "w") as f:
@@ -763,6 +842,7 @@ def main():
     external(df, store, out)
     mask_evidence(df, store, args.grid, args.gen_roots, out)
     mask_control(df, store, args.grid, args.gen_roots, out)
+    confound(df, out)
     write_numbers(out)
     print(f"wrote {len(NUM)} numbers and {len(glob(out + '/*.csv'))} tables to {out}")
 

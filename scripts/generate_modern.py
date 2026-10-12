@@ -131,6 +131,13 @@ def make_mask(kind: str, gid: int, size: int) -> Image.Image:
     return m
 
 
+def magicbrush_mask(m: Image.Image) -> Image.Image:
+    """MagicBrush's mask_img is the source photo with the edited region made
+    transparent (RGBA). Return a binary mask: white = edited region."""
+    a = np.asarray(m.convert("RGBA"))[..., 3]
+    return Image.fromarray(((a < 128) * 255).astype(np.uint8), "L")
+
+
 def magicbrush_manifest(args):
     """MagicBrush dev split: every row is one (source, mask, instruction, human target) edit."""
     from datasets import load_dataset
@@ -149,7 +156,7 @@ def magicbrush_manifest(args):
                 save_retry(img.convert("RGB").resize(sz), p)
         mp = os.path.join(args.out, "masks", f"{i:05d}_edit.png")
         if not os.path.exists(mp):
-            save_retry(r["mask_img"].convert("L").resize(sz), mp)
+            save_retry(magicbrush_mask(r["mask_img"]).resize(sz, Image.NEAREST), mp)
     return ds, path
 
 
