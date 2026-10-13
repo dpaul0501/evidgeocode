@@ -64,7 +64,7 @@ sh(f"python scripts/generate_modern.py --model {a.model} --master-manifest {{M}}
 sh(f"python scripts/run_eval.py --guidance-roots {{G}} --trajectory-roots {{G}} --master-manifest {{M}} "
    f"--real --out /kaggle/working/eval --device cuda {a.eval_args}")
 {"sh(f'python scripts/image_stats.py --guidance-roots {G} --master-manifest {M} --real --out /kaggle/working/eval')" if a.imstats else ""}
-sh(f"python scripts/analyze.py --run-dir /kaggle/working/eval --gen-roots {G}")
+sh(f"python scripts/analyze.py --run-dir /kaggle/working/eval --gen-roots {{G}}")
 {"sh('cd /kaggle/working && zip -qr images.zip ' + os.path.basename(G))" if a.keep_images else ""}
 sh(f"rm -rf {{G}}/images {{G}}/traj /kaggle/working/eval/real_cache /kaggle/working/repo")
 '''
