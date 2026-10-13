@@ -173,8 +173,8 @@ class Generator:
         def cb(p, i, t, kw):
             lat = kw["latents"]
             sched = p.scheduler
-            k = sched.step_index  # already advanced past step i
             if traj_every and state["prev"] is not None and (i % traj_every == 0):
+                k = sched.step_index  # already advanced past step i (flow-matching schedulers only)
                 s0, s1 = sched.sigmas[k - 1].item(), sched.sigmas[k].item()
                 v = (lat.float() - state["prev"].float()) / (s1 - s0)
                 x0 = state["prev"].float() - s0 * v
