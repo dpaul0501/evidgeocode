@@ -85,7 +85,10 @@ class Generator:
 
         self.spec, self.size, self.device = spec, size, device
         self.steps = steps or spec.steps
-        if not torch.cuda.is_bf16_supported():  # T4 / P100
+        # bf16 only where it is native (compute capability >= 8.0, e.g. A100/L4/H100).
+        # is_bf16_supported() can be True on a T4 via slow emulation (~10x slower).
+        if dtype == torch.bfloat16 and (not torch.cuda.is_available()
+                                        or torch.cuda.get_device_capability(0)[0] < 8):
             dtype = torch.float16
         self.dtype = dtype
         cls = getattr(diffusers, spec.t2i)
