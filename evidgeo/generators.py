@@ -43,6 +43,8 @@ class Spec:
     extra: dict = field(default_factory=dict)
     inpaint: str | None = None      # diffusers inpainting pipeline (shares weights)
     edit_via_image: bool = False    # t2i pipeline accepts image= as edit conditioning
+    load: dict = field(default_factory=dict)  # extra from_pretrained kwargs
+    flow_matching: bool = True      # x0 previews assume a flow-matching scheduler
 
     @property
     def has_i2i(self) -> bool:
@@ -50,6 +52,15 @@ class Spec:
 
 
 MODELS = {s.name: s for s in [
+    # SD 1.x with the settings that produced multiguide_coco_v2 (512 px, 50 PNDM steps)
+    Spec("sd14", "CompVis/stable-diffusion-v1-4", "StableDiffusionPipeline",
+         "StableDiffusionImg2ImgPipeline", "guidance_scale", 7.5, (1, 2, 4, 7.5), 50, "0.27.0",
+         "CreativeML OpenRAIL-M", 6, load={"safety_checker": None, "requires_safety_checker": False},
+         flow_matching=False),
+    Spec("sd15", "stable-diffusion-v1-5/stable-diffusion-v1-5", "StableDiffusionPipeline",
+         "StableDiffusionImg2ImgPipeline", "guidance_scale", 7.5, (1, 2, 4, 7.5), 50, "0.27.0",
+         "CreativeML OpenRAIL-M", 6, load={"safety_checker": None, "requires_safety_checker": False},
+         flow_matching=False),
     Spec("sd35-medium", "stabilityai/stable-diffusion-3.5-medium", "StableDiffusion3Pipeline",
          "StableDiffusion3Img2ImgPipeline", "guidance_scale", 4.5, (1, 2, 3.5, 5, 7, 9), 28,
          "0.31.0", "Stability Community (gated: accept terms, set HF_TOKEN)", 16,
@@ -79,9 +90,9 @@ class Generator:
         self.dtype = dtype
         cls = getattr(diffusers, spec.t2i)
         if device_map:  # e.g. "balanced": spread components over all visible GPUs
-            self.pipe = cls.from_pretrained(spec.repo, torch_dtype=dtype, device_map=device_map)
+            self.pipe = cls.from_pretrained(spec.repo, torch_dtype=dtype, device_map=device_map, **spec.load)
         else:
-            self.pipe = cls.from_pretrained(spec.repo, torch_dtype=dtype)
+            self.pipe = cls.from_pretrained(spec.repo, torch_dtype=dtype, **spec.load)
             if offload:
                 self.pipe.enable_model_cpu_offload()
             else:
@@ -116,7 +127,9 @@ class Generator:
         vae = pipe.vae
         lat = lat.to(vae.device)  # with device_map the VAE may sit on another GPU
         name = self.spec.name
-        if name.startswith("sd35"):
+        if name in ("sd14", "sd15"):
+            img = vae.decode((lat / vae.config.scaling_factor).to(vae.dtype)).sample
+        elif name.startswith("sd35"):
             x = lat / vae.config.scaling_factor + vae.config.shift_factor
             img = vae.decode(x.to(vae.dtype)).sample
         elif name.startswith("flux2"):
@@ -143,6 +156,8 @@ class Generator:
                  edit: Image.Image | None = None):
         """init -> img2img (SDEdit); init + mask -> inpainting (white = regenerate);
         edit -> instruction editing with the image as conditioning (FLUX.2)."""
+        if traj_every and not self.spec.flow_matching:
+            traj_every = 0  # the x0 recovery in cb() is only valid for flow-matching samplers
         if mask is not None:
             pipe = self.inpaint
         elif init is not None:

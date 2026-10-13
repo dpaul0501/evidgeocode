@@ -32,6 +32,7 @@ ap.add_argument("--dataset", default="",
                 help="generation folder name = dataset name in the analysis; give all shards of one "
                      "run the same value so their outputs merge (default: gen_<kernel name>)")
 ap.add_argument("--branch", default="main")
+ap.add_argument("--imstats", action="store_true", help="also compute prompt-free image statistics")
 ap.add_argument("--accelerator", default="", help="Kaggle machine_shape; empty = default GPU")
 a = ap.parse_args()
 
@@ -62,7 +63,8 @@ G = "/kaggle/working/{a.dataset or 'gen_' + a.name}"
 sh(f"python scripts/generate_modern.py --model {a.model} --master-manifest {{M}} --out {{G}} {a.gen_args}")
 sh(f"python scripts/run_eval.py --guidance-roots {{G}} --trajectory-roots {{G}} --master-manifest {{M}} "
    f"--real --out /kaggle/working/eval --device cuda {a.eval_args}")
-sh("python scripts/analyze.py --run-dir /kaggle/working/eval")
+{"sh(f'python scripts/image_stats.py --guidance-roots {G} --master-manifest {M} --real --out /kaggle/working/eval')" if a.imstats else ""}
+sh(f"python scripts/analyze.py --run-dir /kaggle/working/eval --gen-roots {G}")
 {"sh('cd /kaggle/working && zip -qr images.zip ' + os.path.basename(G))" if a.keep_images else ""}
 sh(f"rm -rf {{G}}/images {{G}}/traj /kaggle/working/eval/real_cache /kaggle/working/repo")
 '''
