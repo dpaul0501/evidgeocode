@@ -133,7 +133,7 @@ MODEL = {"sd14": "SD~1.4", "sd15": "SD~1.5", "biggan": "BigGAN", "sd35-medium": 
          "coco": "COCO (real)", "magicbrush": "MagicBrush (ref.)"}
 DS = {"multiguide_coco_v2": "v2", "multiguide_coco_v3": "v3", "multiguide_consistency": "stab.",
       "Erland__coco_captions_small": "real", "kaggle_sd35m": "ext.", "coco": "ext.",
-      "inpaint": "inpaint", "edit": "edit", "faces": "faces"}
+      "inpaint": "inpaint", "edit": "edit", "faces": "faces", "kaggle_sd15sweep": "sweep", "kaggle_sd14sweep": "sweep"}
 
 
 def t_corpus(runs, tdir):
@@ -175,8 +175,9 @@ def t_guidance(runs, tdir):
 def t_sweep(runs, tdir):
     rows = []
     task = {"sd35": "T2I (COCO)", "klein": "T2I (COCO)", "qwen": "T2I (COCO)",
-            "edit": "Editing (MagicBrush)", "faces": "T2I (faces)"}
-    for name in ("sd35", "klein", "qwen", "edit", "faces"):
+            "edit": "Editing (MagicBrush)", "faces": "T2I (faces)", "sd15sw": "T2I (COCO v3)",
+            "sd14sw": "T2I (COCO v3)"}
+    for name in ("sd14sw", "sd15sw", "sd35", "klein", "qwen", "edit", "faces"):
         d = read(runs, name, "guidance_sweep.csv")
         if d is None:
             continue
@@ -279,7 +280,8 @@ def t_confound(runs, tdir):
         for _, r in d.iterrows():
             if r.model in ("biggan", "magicbrush") or r.design == "logcfg_s>=2":
                 continue
-            task = {"main": f"COCO ({DS.get(r.dataset, r.dataset)})", "faces": "faces", "edit": "editing"}.get(
+            task = {"main": f"COCO ({DS.get(r.dataset, r.dataset)})", "faces": "faces", "edit": "editing",
+                    "sd15sw": "COCO (v3)", "sd14sw": "COCO (v3)"}.get(
                 name, "COCO")
             design = {"text_vs_weak": "caption vs generic", "logcfg": r"$\log s$ sweep"}.get(r.design, esc(r.design))
             rows.append([MODEL.get(r.model, esc(r.model)), task, design, str(int(r.n_prompts)),
