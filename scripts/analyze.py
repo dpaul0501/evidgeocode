@@ -800,6 +800,53 @@ def confound(df, out):
                 put(f"{k}_{col.replace('_holm', '')}", float(r[col]))
 
 
+def edit_control(df, store, g, gen_roots, out):
+    """MagicBrush: evidence inside the human edit mask for the generated edit vs the
+    unedited source and the human-edited target, paired by edit (seeds averaged)."""
+    roots = {os.path.basename(os.path.normpath(r)): r for r in gen_roots}
+    rows = []
+    for ds, root in roots.items():
+        e = df[(df.corpus == "guidance") & (df.dataset == ds)]
+        if not (e.model == "magicbrush").any():
+            continue
+        for gid, grp in e.groupby("gid"):
+            mp = os.path.join(root, "masks", f"{int(gid):05d}_edit.png")
+            if not os.path.exists(mp):
+                continue
+            cov = mask_grid(mp, g)
+            for sig in ("pec", "rollout", "loo", "ss"):
+                r = dict(dataset=ds, gid=gid, signal=sig, area=float(cov.mean()))
+                for cond, sub in grp.groupby(grp.model + "/" + grp["mode"]):
+                    vals = [float((M.normalize(store[k][f"g{g}_{sig}"]).reshape(g, g) * cov).sum())
+                            for k in sub.key if k in store and f"g{g}_{sig}" in store[k]]
+                    r[cond] = float(np.mean(vals)) if vals else np.nan
+                rows.append(r)
+    per = pd.DataFrame(rows)
+    if per.empty:
+        return
+    per.to_csv(f"{out}/edit_control_perimage.csv", index=False)
+    gens = [c for c in per.columns if "/edit-cfg" in c]
+    summ = []
+    for sig, grp in per.groupby("signal"):
+        for gcol in gens:
+            for ref in ("magicbrush/source", "magicbrush/human-target"):
+                res = paired(grp[gcol], grp[ref])
+                summ.append(dict(signal=sig, edit=gcol, ref=ref, n=res["n"], area=grp.area.mean(),
+                                 mean_edit=res.get("mean_a"), mean_ref=res.get("mean_b"),
+                                 dz=res.get("dz"), p=res.get("p_wilcoxon")))
+        res = paired(grp["magicbrush/human-target"], grp["magicbrush/source"])
+        summ.append(dict(signal=sig, edit="magicbrush/human-target", ref="magicbrush/source", n=res["n"],
+                         area=grp.area.mean(), mean_edit=res.get("mean_a"), mean_ref=res.get("mean_b"),
+                         dz=res.get("dz"), p=res.get("p_wilcoxon")))
+    t = pd.DataFrame(summ)
+    t["p_holm"] = holm(t["p"])
+    t.to_csv(f"{out}/edit_control.csv", index=False)
+    for _, r in t.iterrows():
+        k = f"editctl_{r.signal}_{r.edit.split('/')[-1]}_vs_{r.ref.split('/')[-1]}"
+        for col in ("area", "mean_edit", "mean_ref", "dz", "p_holm"):
+            put(f"{k}_{col.replace('_holm', '')}", float(r[col]))
+
+
 def write_numbers(out):
     clean = {k: (None if isinstance(v, float) and np.isnan(v) else v) for k, v in NUM.items()}
     with open(f"{out}/numbers.json", "w") as f:
@@ -842,6 +889,7 @@ def main():
     external(df, store, out)
     mask_evidence(df, store, args.grid, args.gen_roots, out)
     mask_control(df, store, args.grid, args.gen_roots, out)
+    edit_control(df, store, args.grid, args.gen_roots, out)
     confound(df, out)
     write_numbers(out)
     print(f"wrote {len(NUM)} numbers and {len(glob(out + '/*.csv'))} tables to {out}")
