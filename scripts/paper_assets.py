@@ -270,6 +270,77 @@ def t_maskctl(runs, tdir):
                 "averaged over 3 seeds). Paired by caption, Holm-corrected.", "tab:maskctl", star=True)
 
 
+def t_confound(runs, tdir):
+    rows = []
+    for name in ("main", "sd35", "klein", "faces", "edit", "sd15sw", "sd14sw"):
+        d = read(runs, name, "confound.csv")
+        if d is None:
+            continue
+        for _, r in d.iterrows():
+            if r.model in ("biggan", "magicbrush") or r.design == "logcfg_s>=2":
+                continue
+            task = {"main": f"COCO ({DS.get(r.dataset, r.dataset)})", "faces": "faces", "edit": "editing"}.get(
+                name, "COCO")
+            design = {"text_vs_weak": "caption vs generic", "logcfg": r"$\log s$ sweep"}.get(r.design, esc(r.design))
+            rows.append([MODEL.get(r.model, esc(r.model)), task, design, str(int(r.n_prompts)),
+                         f3(r.pec_gini_b), f3(r.sal_gini_b), f3(r.edge_gini_b),
+                         f"{f3(r.resid_b)} [{f3(r.resid_lo)}, {f3(r.resid_hi)}]",
+                         f"{f3(r.pec_adj_b)} ({f3(100 * r.pec_adj_retained, 0)}\\%)", fp(r.pec_adj_p_holm)])
+    table(f"{tdir}/confound.tex", "lllrrrrlrr",
+          r"Model & Data & Contrast & $n_c$ & Grad-PEC & Saliency & Edge & Residual [95\% CI] & "
+          r"Grad-PEC adj. (kept) & $p$",
+          rows, r"Is the guidance effect about the prompt? Effect of the contrast on Gini of Grad-PEC, of the "
+                r"prompt-free saliency map, and of a Sobel edge map; the prompt-specific residual "
+                r"(Grad-PEC $-$ saliency); and the Grad-PEC effect after adjusting for image statistics "
+                r"(edge Gini and centre share, RMS contrast, colourfulness, high-frequency energy, saturation). "
+                r"Caption fixed effects, caption-clustered errors, Holm-corrected $p$; $n_c$ = captions.",
+          "tab:confound", star=True, size=r"\scriptsize")
+
+
+def t_editctl(runs, tdir):
+    d = read(runs, "edit", "edit_control.csv")
+    rows = []
+    if d is not None:
+        lab = {"edit-cfg1": "FLUX.2 $s{=}1$", "edit-cfg4": "FLUX.2 $s{=}4$", "edit-cfg8": "FLUX.2 $s{=}8$",
+               "human-target": "Human edit"}
+        for _, r in d.iterrows():
+            e, ref = r["edit"].split("/")[-1], r["ref"].split("/")[-1]
+            if e == "edit-cfg1" or e == "edit-cfg8":
+                continue
+            rows.append([esc(r.signal), lab.get(e, esc(e)), "source" if ref == "source" else "human edit",
+                         str(int(r.n)), f3(r.area), f3(r.mean_edit), f3(r.mean_ref), f3(r.dz, 2), fp(r.p_holm)])
+    table(f"{tdir}/editctl.tex", "lllrrrrrr",
+          r"Map & Image & vs. & $n$ & Area & Inside (image) & Inside (ref.) & $d_z$ & $p$", rows,
+          "Share of evidence inside the human-drawn MagicBrush edit mask, paired by edit (seeds averaged). "
+          "The human edit is the positive control: a map that follows the edit should rise from source to "
+          "human edit. Holm-corrected.", "tab:editctl", star=True)
+
+
+def t_traj(runs, tdir):
+    rows = []
+    for name, lab in (("sd35", "SD~3.5-M (COCO)"), ("klein", "FLUX.2 (COCO)"), ("faces", "FLUX.2 (faces)")):
+        tp = os.path.join(runs.get(name, ""), "uncertainty_trajectory.csv")
+        if name not in runs or not os.path.exists(tp):
+            continue
+        t = pd.read_csv(tp)
+        c = t[t["mode"].str.match(r"^cfg[0-9.]+$")].copy()
+        c["s"] = c["mode"].str[3:].astype(float)
+        means = c.groupby("s")["pec_traj_commit_frac"].mean()
+        import statsmodels.api as sm
+
+        c["x"] = np.log(c.s)
+        dm = c[["pec_traj_commit_frac", "x"]] - c.groupby("gid")[["pec_traj_commit_frac", "x"]].transform("mean")
+        m = sm.OLS(dm.pec_traj_commit_frac, dm[["x"]]).fit(cov_type="cluster", cov_kwds={"groups": c.gid})
+        gen = t[t["mode"] == "generic"]["pec_traj_commit_frac"].mean()
+        rows.append([lab, str(c.gid.nunique()), str(int(c.seed.nunique())),
+                     r" $\to$ ".join(f"{k:g}:{f3(v, 2)}" for k, v in means.items()), f3(gen, 2),
+                     f3(m.params["x"], 3), fp(m.pvalues["x"])])
+    table(f"{tdir}/traj.tex", "lrrlrrr", r"Model & Captions & Seeds & Commit fraction by $s$ & Generic & Slope & $p$",
+          rows, r"Share of the denoising trajectory before the Grad-PEC map of $\hat x_0$ settles "
+                r"(JSD to final $\le 0.05$). Slope on $\log s$ with caption fixed effects; not corrected for "
+                r"the three tests.", "tab:traj", star=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
@@ -279,7 +350,8 @@ def main():
     os.makedirs(os.path.join(a.out, "tables"), exist_ok=True)
     n = write_numbers(runs, a.out)
     td = os.path.join(a.out, "tables")
-    for fn in (t_corpus, t_guidance, t_sweep, t_stability, t_faith, t_detection, t_realgen, t_masks, t_maskctl):
+    for fn in (t_corpus, t_guidance, t_sweep, t_stability, t_faith, t_detection, t_realgen, t_masks, t_maskctl,
+               t_confound, t_editctl, t_traj):
         fn(runs, td)
     print(f"{n} numbers, {len(os.listdir(td))} tables -> {a.out}")
 

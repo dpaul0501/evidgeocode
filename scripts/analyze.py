@@ -749,11 +749,18 @@ def confound(df, out):
     rows = []
 
     def fit(d, term, y, extra):
-        f = f"{y} ~ {term} + C(gid)" + "".join(f" + {c}" for c in extra)
-        m = smf.ols(f, data=d).fit(cov_type="cluster", cov_kwds={"groups": d.gid})
-        k = next(x for x in m.params.index if x.startswith(term.split("(")[0]) and x != "Intercept")
-        lo, hi = m.conf_int().loc[k]
-        return m.params[k], lo, hi, m.pvalues[k]
+        """Caption fixed effects via the within transformation (demean by caption),
+        caption-clustered SEs. Equivalent to y ~ x + C(gid) but stable for
+        thousands of captions."""
+        import statsmodels.api as sm
+
+        cols = [term] + list(extra)
+        d = d.dropna(subset=[y] + cols)
+        dm = d[[y] + cols] - d.groupby("gid")[[y] + cols].transform("mean")
+        keep = [c for c in cols if dm[c].std() > 1e-12]
+        m = sm.OLS(dm[y], dm[keep]).fit(cov_type="cluster", cov_kwds={"groups": d.gid})
+        lo, hi = m.conf_int().loc[term]
+        return m.params[term], lo, hi, m.pvalues[term]
 
     for (ds, model), grp in g.groupby(["dataset", "model"]):
         modes = set(grp["mode"])
