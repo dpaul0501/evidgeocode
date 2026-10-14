@@ -153,34 +153,99 @@ class ClipAttributor:
 
     @torch.no_grad()
     def faithfulness(self, x: torch.Tensor, txt: torch.Tensor, maps: dict, g: int,
-                     steps: int = 16, seed: int = 0) -> dict:
-        """Deletion / insertion AUC for each map (mean utility along the curve).
+                     steps: int = 16, seed: int = 0, n_random: int = 1,
+                     fill: str | None = None) -> dict:
+        """Deletion / insertion curves of the utility for each map.
 
         Deletion hides the highest-evidence patches first (lower AUC = more
         faithful); insertion reveals them first onto a fully masked image
-        (higher = more faithful). A random patch order gives the reference.
+        (higher = more faithful). References: the mean over `n_random` random
+        orders and a centre-first order. `fill` overrides the occlusion fill so
+        that maps built with one fill are tested with another (non-circular).
+        Reports raw AUC and AUC normalised to [u(empty), u(full)] per image.
         """
         n = g * g
         ks = np.unique(np.linspace(0, n, steps + 1).round().astype(int))
         b = patch_bounds(self.size, g)
         rng = np.random.default_rng(seed)
+        rr, cc = np.divmod(np.arange(n), g)
+        centre = np.argsort(np.hypot(rr - (g - 1) / 2, cc - (g - 1) / 2), kind="stable")
+        saved = self.mask_mode
+        if fill:
+            self.mask_mode = fill
         out = {}
-        for i in range(x.shape[0]):
-            orders = {k: np.argsort(-v[i].ravel(), kind="stable") for k, v in maps.items()}
-            orders["random"] = rng.permutation(n)
-            for name, order in orders.items():
-                keep_del = torch.ones(len(ks), self.size, self.size, dtype=torch.bool,
-                                      device=self.device)
-                keep_ins = torch.zeros_like(keep_del)
-                for j, k in enumerate(ks):
-                    for p in order[:k]:
-                        (r0, r1), (c0, c1) = b[p // g], b[p % g]
-                        keep_del[j, r0:r1, c0:c1] = False
-                        keep_ins[j, r0:r1, c0:c1] = True
-                xi = x[i:i + 1].expand(len(ks), -1, -1, -1)
+        try:
+            for i in range(x.shape[0]):
                 t = txt[i:i + 1]
-                d = self.similarity(self._masked(xi, keep_del), t).double().cpu().numpy()
-                s = self.similarity(self._masked(xi, keep_ins), t).double().cpu().numpy()
-                out.setdefault(f"{name}_del_auc", []).append(float(np.trapezoid(d, ks / n)))
-                out.setdefault(f"{name}_ins_auc", []).append(float(np.trapezoid(s, ks / n)))
+                xi1 = x[i:i + 1]
+                u_full = float(self.similarity(xi1, t))
+                u_empty = float(self.similarity(self._masked(xi1, torch.zeros(
+                    1, self.size, self.size, dtype=torch.bool, device=self.device)), t))
+                span = u_full - u_empty if abs(u_full - u_empty) > 1e-6 else np.nan
+                orders = {k: [np.argsort(-v[i].ravel(), kind="stable")] for k, v in maps.items()}
+                orders["random"] = [rng.permutation(n) for _ in range(n_random)]
+                orders["centre"] = [centre]
+                for name, olist in orders.items():
+                    dels, inss = [], []
+                    for order in olist:
+                        keep_del = torch.ones(len(ks), self.size, self.size, dtype=torch.bool,
+                                              device=self.device)
+                        keep_ins = torch.zeros_like(keep_del)
+                        for j, k in enumerate(ks):
+                            for p in order[:k]:
+                                (r0, r1), (c0, c1) = b[p // g], b[p % g]
+                                keep_del[j, r0:r1, c0:c1] = False
+                                keep_ins[j, r0:r1, c0:c1] = True
+                        xi = xi1.expand(len(ks), -1, -1, -1)
+                        dels.append(self.similarity(self._masked(xi, keep_del), t).double().cpu().numpy())
+                        inss.append(self.similarity(self._masked(xi, keep_ins), t).double().cpu().numpy())
+                    d, s_ = np.mean(dels, 0), np.mean(inss, 0)
+                    da, ia = float(np.trapezoid(d, ks / n)), float(np.trapezoid(s_, ks / n))
+                    out.setdefault(f"{name}_del_auc", []).append(da)
+                    out.setdefault(f"{name}_ins_auc", []).append(ia)
+                    out.setdefault(f"{name}_del_nauc", []).append((da - u_empty) / span)
+                    out.setdefault(f"{name}_ins_nauc", []).append((ia - u_empty) / span)
+        finally:
+            self.mask_mode = saved
         return {k: np.asarray(v) for k, v in out.items()}
+
+
+class SiglipAttributor(ClipAttributor):
+    """Same maps with a non-CLIP backbone (SigLIP, sigmoid-loss image-text model).
+
+    Utility is the cosine of the pooled (MAP-head) image and text embeddings.
+    SigLIP has no CLS token, so attention rollout is not defined; rollout()
+    returns a uniform map and only the image embedding is used.
+    """
+
+    def __init__(self, model_id: str = "google/siglip-base-patch16-224", device: str = "cuda",
+                 size: int = 224, mask_mode: str = "mean"):
+        from transformers import AutoProcessor, SiglipModel
+
+        self.model_id, self.device, self.size, self.mask_mode = model_id, device, size, mask_mode
+        self.model = SiglipModel.from_pretrained(model_id).to(device).eval()
+        for p in self.model.parameters():
+            p.requires_grad_(False)
+        self.proc = AutoProcessor.from_pretrained(model_id)
+        ip = self.proc.image_processor
+        self.mean = torch.tensor(ip.image_mean, device=device).view(1, 3, 1, 1)
+        self.std = torch.tensor(ip.image_std, device=device).view(1, 3, 1, 1)
+        self.vit_grid = self.model.config.vision_config.image_size // self.model.config.vision_config.patch_size
+
+    def image_emb(self, x: torch.Tensor, output_attentions: bool = False):
+        out = self.model.vision_model(pixel_values=x, return_dict=True)
+        emb = out.pooler_output
+        return (emb, None) if output_attentions else emb
+
+    @torch.no_grad()
+    def text_emb(self, texts: list[str]) -> torch.Tensor:
+        t = self.proc(text=texts, padding="max_length", max_length=64, truncation=True,
+                      return_tensors="pt").to(self.device)
+        out = self.model.text_model(input_ids=t["input_ids"], return_dict=True)
+        return F.normalize(out.pooler_output, dim=-1)
+
+    @torch.no_grad()
+    def rollout(self, x: torch.Tensor, g: int):
+        emb = self.image_emb(x)
+        uni = np.full((x.shape[0], g, g), 1.0 / (g * g))
+        return uni, F.normalize(emb, dim=-1)

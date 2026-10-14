@@ -74,6 +74,36 @@ def test_mask_modes_hide_one_patch(attr, batch, mode):
 def test_faithfulness_keys(attr, batch):
     x, t1, _ = batch
     maps = {"pec": attr.grad_maps(x, t1, 7)["pec"]}
-    out = attr.faithfulness(x, t1, maps, 7, steps=4)
-    assert set(out) == {"pec_del_auc", "pec_ins_auc", "random_del_auc", "random_ins_auc"}
+    out = attr.faithfulness(x, t1, maps, 7, steps=4, n_random=3, fill="blur")
+    assert set(out) == {f"{m}_{c}_{a}" for m in ("pec", "random", "centre")
+                        for c in ("del", "ins") for a in ("auc", "nauc")}
     assert out["pec_del_auc"].shape == (2,)
+    assert attr.mask_mode == "mean"  # fill override is restored
+
+
+def test_siglip_attributor_tiny():
+    from transformers import SiglipConfig, SiglipModel
+
+    from evidgeo.attribution import SiglipAttributor
+
+    torch.manual_seed(0)
+    cfg = SiglipConfig(text_config=dict(hidden_size=32, intermediate_size=64, num_attention_heads=2,
+                                        num_hidden_layers=2, vocab_size=100, max_position_embeddings=64),
+                       vision_config=dict(hidden_size=32, intermediate_size=64, num_attention_heads=2,
+                                          num_hidden_layers=2, image_size=224, patch_size=32))
+    a = object.__new__(SiglipAttributor)
+    a.device, a.size, a.mask_mode = "cpu", 224, "mean"
+    a.model = SiglipModel(cfg).eval()
+    for p in a.model.parameters():
+        p.requires_grad_(False)
+    a.mean = torch.full((1, 3, 1, 1), 0.5)
+    a.std = torch.full((1, 3, 1, 1), 0.5)
+    a.vit_grid = 7
+    x = torch.randn(2, 3, 224, 224)
+    t1, t2 = F.normalize(torch.randn(2, 32), dim=-1), F.normalize(torch.randn(2, 32), dim=-1)
+    m1, m2 = a.grad_maps(x, t1, 7), a.grad_maps(x, t2, 7)
+    assert not np.allclose(m1["pec"], m2["pec"])
+    r, emb = a.rollout(x, 7)
+    assert np.allclose(r.sum(axis=(1, 2)), 1) and emb.shape == (2, 32)
+    drops, base = a.loo(x, t1, 7)
+    assert drops.shape == (2, 7, 7)

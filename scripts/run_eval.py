@@ -62,6 +62,11 @@ def parse_args():
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--io-threads", type=int, default=16)
     ap.add_argument("--clip", default="openai/clip-vit-base-patch32")
+    ap.add_argument("--backbone", default="clip", choices=["clip", "siglip"])
+    ap.add_argument("--siglip", default="google/siglip-base-patch16-224")
+    ap.add_argument("--faith-fill", default="", choices=["", "mean", "zero", "blur"],
+                    help="Occlusion fill for faithfulness curves (default: same as --mask-mode)")
+    ap.add_argument("--faith-random", type=int, default=1, help="Random orders averaged for the baseline")
     ap.add_argument("--device", default="cuda")
     return ap.parse_args()
 
@@ -166,7 +171,8 @@ def process_chunk(attr, recs, imgs, args) -> tuple[pd.DataFrame, dict]:
                     if sel:
                         fm = {k: maps[k][sel] for k in ("pec", "rollout", "loo", "ss", "gauss1", "gauss2")
                               if k in maps}
-                        f = attr.faithfulness(x[sel], txt[sel], fm, g)
+                        f = attr.faithfulness(x[sel], txt[sel], fm, g, n_random=args.faith_random,
+                                              fill=args.faith_fill or None)
                         for j, i in enumerate(sel):
                             for k, v in f.items():
                                 batch_rows[i][f"{pre}{k}"] = float(v[j])
@@ -200,9 +206,12 @@ def main():
                    started=time.strftime("%Y-%m-%d %H:%M:%S"))
         json.dump(cfg, f, indent=2)
 
-    from evidgeo.attribution import ClipAttributor
+    from evidgeo.attribution import ClipAttributor, SiglipAttributor
 
-    attr = ClipAttributor(args.clip, args.device, mask_mode=args.mask_mode)
+    if args.backbone == "siglip":
+        attr = SiglipAttributor(args.siglip, args.device, mask_mode=args.mask_mode)
+    else:
+        attr = ClipAttributor(args.clip, args.device, mask_mode=args.mask_mode)
 
     jobs = []
     for b, grp in groupby(recs, key=bucket_of):
