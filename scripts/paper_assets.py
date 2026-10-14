@@ -217,24 +217,34 @@ def t_faith(runs, tdir):
               rows, "Deletion (lower is more faithful) and insertion (higher is more faithful) AUC of CLIP "
                     "similarity, paired on the same images.", "tab:faith")
         return
-    name = {"pec": "Grad-PEC", "sal": "Saliency", "rollout": "Rollout", "ss": "SpatialShap", "loo": "LOO",
-            "random": "random", "centre": "centre-out"}
+    name = {"pec": "Grad-PEC", "sal": "Saliency", "loo": "LOO", "ss": "SpatialShap"}
     rows = []
     for run, bb in (("clipfaith", "CLIP"), ("siglip", "SigLIP")):
         d = read(runs, run, "faithfulness.csv")
         if d is None:
             continue
-        keep = d[d.b.isin(["random", "centre", "sal"]) & d.a.isin(["pec", "sal", "loo", "ss"])]
-        for _, r in keep.iterrows():
-            rows.append([bb, name.get(r.a, esc(r.a)), name.get(r.b, esc(r.b)), r.kind, str(int(r.n)),
-                         f3(r.nauc_a, 3), f3(r.nauc_b, 3), f3(r.dz, 2), fp(r.p_wilcoxon)])
-    table(f"{tdir}/faithfulness.tex", "llllrrrrr",
-          r"Backbone & Map $a$ & Map $b$ & Curve & $n$ & nAUC $a$ & nAUC $b$ & $d_z$ & $p$", rows,
-          r"Deletion (lower is more faithful) and insertion (higher is more faithful) curves with a blur fill "
-          r"that differs from the mean fill used to build the LOO maps. nAUC is pooled over images: "
-          r"$(\overline{\mathrm{AUC}}-\bar u_\varnothing)/(\bar u_{\mathrm{full}}-\bar u_\varnothing)$. "
-          r"The random baseline averages 20 orders; centre-out removes patches by distance from the centre. "
-          r"$d_z$ and the Wilcoxon $p$ are on raw AUC, paired by image.", "tab:faith", star=True)
+        d = d.set_index(["a", "b", "kind"])
+
+        def get(a_, b_, kind, col):
+            return d.loc[(a_, b_, kind), col] if (a_, b_, kind) in d.index else np.nan
+
+        n = int(get("pec", "random", "del", "n"))
+        rows.append([bb, "random (20 orders)", str(n), f3(get("pec", "random", "del", "nauc_b")),
+                     f3(get("pec", "random", "ins", "nauc_b")), "", "", "", ""])
+        rows.append(["", "centre-out", str(n), f3(get("pec", "centre", "del", "nauc_b")),
+                     f3(get("pec", "centre", "ins", "nauc_b")), "", "", "", ""])
+        for m in ("pec", "sal", "loo", "ss"):
+            rows.append(["", name[m], str(n), f3(get(m, "random", "del", "nauc_a")), f3(get(m, "random", "ins", "nauc_a"))] +
+                        [fp(get(m, base, kind, "p_wilcoxon")) for base in ("random", "centre") for kind in ("del", "ins")])
+    table(f"{tdir}/faithfulness.tex", "llrrrrrrr",
+          r"Backbone & Map & $n$ & Del. & Ins. & \multicolumn{2}{c}{$p$ vs.\ random} & "
+          r"\multicolumn{2}{c}{$p$ vs.\ centre-out} \\ & & & nAUC$\downarrow$ & nAUC$\uparrow$ & del & ins & del & ins",
+          rows,
+          r"Deletion and insertion faithfulness with a blur fill, which differs from the mean fill used to build "
+          r"the LOO maps (SD~1.5 sweep and SD~3.5 images, 100 per condition). nAUC is pooled over images, "
+          r"$(\overline{\mathrm{AUC}}-\bar u_\varnothing)/(\bar u_{\mathrm{full}}-\bar u_\varnothing)$; "
+          r"the random baseline averages 20 orders and centre-out removes patches by distance from the centre. "
+          r"Wilcoxon $p$ on raw AUC, paired by image.", "tab:faith", star=True)
 
 
 def t_detection(runs, tdir):
