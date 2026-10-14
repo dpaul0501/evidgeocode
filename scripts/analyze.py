@@ -266,14 +266,28 @@ def smoothing(df, out):
     t = pd.DataFrame(rows)
     # faithfulness: paired comparisons on the same images
     fa = []
-    for a, b in [("ss", "loo"), ("ss", "gauss1"), ("ss", "gauss2"), ("pec", "random"),
-                 ("rollout", "random"), ("ss", "random"), ("loo", "random")]:
+    # Tests use raw AUC (both maps share the image's own full/empty similarity). For a level on a
+    # common 0-1 scale, nauc is pooled: (mean AUC - mean u_empty) / (mean u_full - mean u_empty);
+    # per-image ratios blow up when the fill barely changes the similarity.
+    pairs = [("ss", "loo"), ("ss", "gauss1"), ("ss", "gauss2"), ("pec", "sal")]
+    pairs += [(m, base) for base in ("random", "centre") for m in ("pec", "sal", "rollout", "ss", "loo")]
+
+    def pooled(col, idx):
+        if "u_full" not in g or "u_empty" not in g:
+            return np.nan
+        ue, uf = g.loc[idx, "u_empty"].mean(), g.loc[idx, "u_full"].mean()
+        return float((g.loc[idx, col].mean() - ue) / (uf - ue))
+
+    for a, b in pairs:
         for kind in ("del", "ins"):
             ca, cb = f"{a}_{kind}_auc", f"{b}_{kind}_auc"
             if ca in g and cb in g:
                 res = paired(g[ca], g[cb])
+                idx = (g[ca] - g[cb]).dropna().index
+                res.update(nauc_a=pooled(ca, idx), nauc_b=pooled(cb, idx))
                 fa.append(dict(a=a, b=b, kind=kind, **res))
-                put(f"faith_{kind}_{a}_vs_{b}_diff", res.get("diff", np.nan))
+                for k in ("diff", "nauc_a", "nauc_b"):
+                    put(f"faith_{kind}_{a}_vs_{b}_{k}", res.get(k, np.nan))
                 put(f"faith_{kind}_{a}_vs_{b}_p", res.get("p_wilcoxon", np.nan))
     t.to_csv(f"{out}/smoothing.csv", index=False)
     pd.DataFrame(fa).to_csv(f"{out}/faithfulness.csv", index=False)

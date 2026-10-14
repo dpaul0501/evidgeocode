@@ -169,7 +169,7 @@ def process_chunk(attr, recs, imgs, args) -> tuple[pd.DataFrame, dict]:
                     sel = [i for i, r in enumerate(recs[s:s + args.batch])
                            if r.gid < args.faith_per_bucket_cutoff.get(bucket_of(r), -1)]
                     if sel:
-                        fm = {k: maps[k][sel] for k in ("pec", "rollout", "loo", "ss", "gauss1", "gauss2")
+                        fm = {k: maps[k][sel] for k in ("pec", "sal", "rollout", "loo", "ss", "gauss1", "gauss2")
                               if k in maps}
                         f = attr.faithfulness(x[sel], txt[sel], fm, g, n_random=args.faith_random,
                                               fill=args.faith_fill or None)

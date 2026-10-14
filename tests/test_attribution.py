@@ -76,7 +76,7 @@ def test_faithfulness_keys(attr, batch):
     maps = {"pec": attr.grad_maps(x, t1, 7)["pec"]}
     out = attr.faithfulness(x, t1, maps, 7, steps=4, n_random=3, fill="blur")
     assert set(out) == {f"{m}_{c}_{a}" for m in ("pec", "random", "centre")
-                        for c in ("del", "ins") for a in ("auc", "nauc")}
+                        for c in ("del", "ins") for a in ("auc", "nauc")} | {"u_full", "u_empty"}
     assert out["pec_del_auc"].shape == (2,)
     assert attr.mask_mode == "mean"  # fill override is restored
 

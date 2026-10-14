@@ -182,6 +182,9 @@ class ClipAttributor:
                 u_empty = float(self.similarity(self._masked(xi1, torch.zeros(
                     1, self.size, self.size, dtype=torch.bool, device=self.device)), t))
                 span = u_full - u_empty if abs(u_full - u_empty) > 1e-6 else np.nan
+                # per-image nauc is unstable when span is small; u_* allow a pooled ratio downstream
+                out.setdefault("u_full", []).append(u_full)
+                out.setdefault("u_empty", []).append(u_empty)
                 orders = {k: [np.argsort(-v[i].ravel(), kind="stable")] for k, v in maps.items()}
                 orders["random"] = [rng.permutation(n) for _ in range(n_random)]
                 orders["centre"] = [centre]
