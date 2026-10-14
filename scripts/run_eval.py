@@ -136,7 +136,7 @@ def process_chunk(attr, recs, imgs, args) -> tuple[pd.DataFrame, dict]:
                     row[f"{pre}pec_swap_rho"] = np.nan if same else spearman(maps["pec"][i], swap[i])
                     row[f"{pre}pec_sal_rho"] = spearman(maps["pec"][i], maps["sal"][i])
             maps["rollout"], emb = attr.rollout(x, g)
-            cos = (emb * txt).sum(-1).double().cpu().numpy()  # full-image CLIP similarity
+            cos = (emb * txt).sum(-1).cpu().double().numpy()  # full-image CLIP similarity
             for i, row in enumerate(batch_rows):
                 row["clip_cos"] = float(cos[i])
             if not args.no_loo:

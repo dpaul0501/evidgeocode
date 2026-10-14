@@ -94,7 +94,7 @@ class ClipAttributor:
             else:
                 score = emb.norm(dim=-1).sum()
             score.backward()
-            out[name] = to_grid(xi.grad.abs().mean(1), g).double().cpu().numpy()
+            out[name] = to_grid(xi.grad.abs().mean(1), g).cpu().double().numpy()
         return out
 
     # ---- attention rollout ---------------------------------------------
@@ -110,7 +110,7 @@ class ClipAttributor:
             a = a / a.sum(-1, keepdim=True)
             r = a @ r
         cls = r[:, 0, 1:].reshape(b, self.vit_grid, self.vit_grid)
-        return to_grid(cls, g).double().cpu().numpy(), F.normalize(emb, dim=-1)
+        return to_grid(cls, g).cpu().double().numpy(), F.normalize(emb, dim=-1)
 
     # ---- occlusion ------------------------------------------------------
     def _masked(self, x: torch.Tensor, keep: torch.Tensor) -> torch.Tensor:
@@ -149,7 +149,7 @@ class ClipAttributor:
                                               txt[i:i + 1])
                               for s in range(0, n, chunk)])
             drops[i] = base[i] - sims
-        return drops.view(-1, g, g).double().cpu().numpy(), base.double().cpu().numpy()
+        return drops.view(-1, g, g).cpu().double().numpy(), base.cpu().double().numpy()
 
     @torch.no_grad()
     def faithfulness(self, x: torch.Tensor, txt: torch.Tensor, maps: dict, g: int,
@@ -197,8 +197,8 @@ class ClipAttributor:
                                 keep_del[j, r0:r1, c0:c1] = False
                                 keep_ins[j, r0:r1, c0:c1] = True
                         xi = xi1.expand(len(ks), -1, -1, -1)
-                        dels.append(self.similarity(self._masked(xi, keep_del), t).double().cpu().numpy())
-                        inss.append(self.similarity(self._masked(xi, keep_ins), t).double().cpu().numpy())
+                        dels.append(self.similarity(self._masked(xi, keep_del), t).cpu().double().numpy())
+                        inss.append(self.similarity(self._masked(xi, keep_ins), t).cpu().double().numpy())
                     d, s_ = np.mean(dels, 0), np.mean(inss, 0)
                     da, ia = float(np.trapezoid(d, ks / n)), float(np.trapezoid(s_, ks / n))
                     out.setdefault(f"{name}_del_auc", []).append(da)
