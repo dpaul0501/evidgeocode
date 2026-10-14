@@ -56,8 +56,9 @@ def parse_args():
     ap.add_argument("--size", type=int, default=512)
     ap.add_argument("--steps", type=int, default=None)
     ap.add_argument("--traj-prompts", type=int, default=0,
-                    help="Save x0 previews for the first N prompts (seed 0 only)")
+                    help="Save x0 previews for the first N prompts (first --traj-seeds seeds)")
     ap.add_argument("--traj-every", type=int, default=4)
+    ap.add_argument("--traj-seeds", type=int, default=1, help="Seeds per prompt that get trajectories")
     ap.add_argument("--shard", default="0/1", help="i/n: this process handles prompts i::n")
     ap.add_argument("--hf-dataset", default="Erland/coco_captions_small")
     ap.add_argument("--hf-split", default="train")
@@ -208,7 +209,7 @@ def main():
                 os.makedirs(os.path.dirname(path), exist_ok=True)
                 seed = args.seed_base + 1000 * gid + k  # same seed across models and modes
                 traj_dir = None
-                if k == 0 and gids.index(gid) < args.traj_prompts:
+                if k < args.traj_seeds and gids.index(gid) < args.traj_prompts:
                     traj_dir = os.path.join(args.out, "traj", spec.name, mode)
                     os.makedirs(traj_dir, exist_ok=True)
                 init = mask = edit = None

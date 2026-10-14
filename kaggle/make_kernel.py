@@ -24,7 +24,9 @@ import textwrap
 ap = argparse.ArgumentParser()
 ap.add_argument("--name", required=True, help="kernel slug, e.g. evidgeo-sd35m-s0")
 ap.add_argument("--user", default="dpaul93")
-ap.add_argument("--model", required=True)
+ap.add_argument("--model", default="", help="generator; empty = evaluate --roots from --input-dataset only")
+ap.add_argument("--input-dataset", default="", help="Kaggle dataset (user/slug) mounted read-only as input")
+ap.add_argument("--roots", default="", help="comma-separated generation folders inside --input-dataset to evaluate")
 ap.add_argument("--gen-args", default="")
 ap.add_argument("--eval-args", default="--grids 7 --faith-per-bucket 0")
 ap.add_argument("--keep-images", action="store_true", help="zip images into the output")
@@ -59,14 +61,23 @@ if os.environ.get("HF_TOKEN") is None:
     except Exception as e:
         print("no HF_TOKEN secret (needed for gated models):", e)
 M = "data/manifest_master_N5000_seed42.jsonl"
-G = "/kaggle/working/{a.dataset or 'gen_' + a.name}"
-sh(f"python scripts/generate_modern.py --model {a.model} --master-manifest {{M}} --out {{G}} {a.gen_args}")
+if {bool(a.model)!r}:
+    G = "/kaggle/working/{a.dataset or 'gen_' + a.name}"
+    sh(f"python scripts/generate_modern.py --model {a.model} --master-manifest {{M}} --out {{G}} {a.gen_args}")
+else:  # evaluate folders from the mounted input dataset (mount path differs across Kaggle versions)
+    import glob
+    G = " ".join(sorted({{os.path.dirname(p) for r in {a.roots.split(",")!r}
+                         for p in glob.glob(f"/kaggle/input/**/{{r}}/images", recursive=True)}}))
+    print("roots:", G, flush=True)
+    assert G, "input roots not found under /kaggle/input"
 sh(f"python scripts/run_eval.py --guidance-roots {{G}} --trajectory-roots {{G}} --master-manifest {{M}} "
    f"--real --out /kaggle/working/eval --device cuda {a.eval_args}")
 {"sh(f'python scripts/image_stats.py --guidance-roots {G} --master-manifest {M} --real --out /kaggle/working/eval')" if a.imstats else ""}
 sh(f"python scripts/analyze.py --run-dir /kaggle/working/eval --gen-roots {{G}}")
 {"sh('cd /kaggle/working && zip -qr images.zip ' + os.path.basename(G))" if a.keep_images else ""}
-sh(f"rm -rf {{G}}/images {{G}}/traj /kaggle/working/eval/real_cache /kaggle/working/repo")
+if {bool(a.model)!r}:
+    sh(f"rm -rf {{G}}/images {{G}}/traj")
+sh("rm -rf /kaggle/working/eval/real_cache /kaggle/working/repo")
 '''
 with open(os.path.join(out, "kernel.py"), "w") as f:
     f.write(textwrap.dedent(code))
@@ -75,7 +86,7 @@ meta = {
     "language": "python", "kernel_type": "script", "is_private": True,
     "enable_gpu": True, "enable_tpu": False, "enable_internet": True,
     "machine_shape": a.accelerator,
-    "dataset_sources": [], "competition_sources": [], "kernel_sources": [], "model_sources": [],
+    "dataset_sources": [a.input_dataset] if a.input_dataset else [], "competition_sources": [], "kernel_sources": [], "model_sources": [],
 }
 with open(os.path.join(out, "kernel-metadata.json"), "w") as f:
     json.dump(meta, f, indent=2)
