@@ -206,14 +206,35 @@ def t_stability(runs, tdir):
 
 
 def t_faith(runs, tdir):
-    d = read(runs, "main", "faithfulness.csv")
+    if not any(k in runs for k in ("clipfaith", "siglip")):  # original mean-fill run only
+        d = read(runs, "main", "faithfulness.csv")
+        rows = []
+        if d is not None:
+            for _, r in d.iterrows():
+                rows.append([esc(r.a), esc(r.b), r.kind, str(int(r.n)), f3(r.mean_a, 4), f3(r.mean_b, 4),
+                             fp(r.p_wilcoxon)])
+        table(f"{tdir}/faithfulness.tex", "lllrrrr", r"Map $a$ & Map $b$ & Curve & $n$ & AUC $a$ & AUC $b$ & $p$",
+              rows, "Deletion (lower is more faithful) and insertion (higher is more faithful) AUC of CLIP "
+                    "similarity, paired on the same images.", "tab:faith")
+        return
+    name = {"pec": "Grad-PEC", "sal": "Saliency", "rollout": "Rollout", "ss": "SpatialShap", "loo": "LOO",
+            "random": "random", "centre": "centre-out"}
     rows = []
-    if d is not None:
-        for _, r in d.iterrows():
-            rows.append([esc(r.a), esc(r.b), r.kind, str(int(r.n)), f3(r.mean_a, 4), f3(r.mean_b, 4), fp(r.p_wilcoxon)])
-    table(f"{tdir}/faithfulness.tex", "lllrrrr", r"Map $a$ & Map $b$ & Curve & $n$ & AUC $a$ & AUC $b$ & $p$", rows,
-          "Deletion (lower is more faithful) and insertion (higher is more faithful) AUC of CLIP similarity, "
-          "paired on the same images.", "tab:faith")
+    for run, bb in (("clipfaith", "CLIP"), ("siglip", "SigLIP")):
+        d = read(runs, run, "faithfulness.csv")
+        if d is None:
+            continue
+        keep = d[d.b.isin(["random", "centre", "sal"]) & d.a.isin(["pec", "sal", "loo", "ss"])]
+        for _, r in keep.iterrows():
+            rows.append([bb, name.get(r.a, esc(r.a)), name.get(r.b, esc(r.b)), r.kind, str(int(r.n)),
+                         f3(r.nauc_a, 3), f3(r.nauc_b, 3), f3(r.dz, 2), fp(r.p_wilcoxon)])
+    table(f"{tdir}/faithfulness.tex", "llllrrrrr",
+          r"Backbone & Map $a$ & Map $b$ & Curve & $n$ & nAUC $a$ & nAUC $b$ & $d_z$ & $p$", rows,
+          r"Deletion (lower is more faithful) and insertion (higher is more faithful) curves with a blur fill "
+          r"that differs from the mean fill used to build the LOO maps. nAUC is pooled over images: "
+          r"$(\overline{\mathrm{AUC}}-\bar u_\varnothing)/(\bar u_{\mathrm{full}}-\bar u_\varnothing)$. "
+          r"The random baseline averages 20 orders; centre-out removes patches by distance from the centre. "
+          r"$d_z$ and the Wilcoxon $p$ are on raw AUC, paired by image.", "tab:faith", star=True)
 
 
 def t_detection(runs, tdir):
@@ -273,7 +294,7 @@ def t_maskctl(runs, tdir):
 
 def t_confound(runs, tdir):
     rows = []
-    for name in ("main", "sd35", "klein", "faces", "edit", "sd15sw", "sd14sw"):
+    for name in ("main", "sd35", "klein", "faces", "edit", "sd15sw", "sd14sw", "siglip"):
         d = read(runs, name, "confound.csv")
         if d is None:
             continue
@@ -284,6 +305,9 @@ def t_confound(runs, tdir):
                     "sd15sw": "COCO (v3)", "sd14sw": "COCO (v3)"}.get(
                 name, "COCO")
             design = {"text_vs_weak": "caption vs generic", "logcfg": r"$\log s$ sweep"}.get(r.design, esc(r.design))
+            if name == "siglip":
+                task = "COCO (v3)" if r.model == "sd15" else "COCO"
+                task += ", SigLIP"
             rows.append([MODEL.get(r.model, esc(r.model)), task, design, str(int(r.n_prompts)),
                          f3(r.pec_gini_b), f3(r.sal_gini_b), f3(r.edge_gini_b),
                          f"{f3(r.resid_b)} [{f3(r.resid_lo)}, {f3(r.resid_hi)}]",
@@ -320,7 +344,8 @@ def t_editctl(runs, tdir):
 
 def t_traj(runs, tdir):
     rows = []
-    for name, lab in (("sd35", "SD~3.5-M (COCO)"), ("klein", "FLUX.2 (COCO)"), ("faces", "FLUX.2 (faces)")):
+    for name, lab in (("sd35", "SD~3.5-M (COCO)"), ("klein", "FLUX.2 (COCO)"), ("faces", "FLUX.2 (faces)"),
+                      ("trajs", "SD~3.5-M (COCO, dense)"), ("trajk", "FLUX.2 (COCO, dense)")):
         tp = os.path.join(runs.get(name, ""), "uncertainty_trajectory.csv")
         if name not in runs or not os.path.exists(tp):
             continue
@@ -335,7 +360,8 @@ def t_traj(runs, tdir):
         m = sm.OLS(dm.pec_traj_commit_frac, dm[["x"]]).fit(cov_type="cluster", cov_kwds={"groups": c.gid})
         gen = t[t["mode"] == "generic"]["pec_traj_commit_frac"].mean()
         rows.append([lab, str(c.gid.nunique()), str(int(c.seed.nunique())),
-                     r" $\to$ ".join(f"{k:g}:{f3(v, 2)}" for k, v in means.items()), f3(gen, 2),
+                     r" $\to$ ".join(f"{k:g}:{f3(v, 2)}" for k, v in means.items()),
+                     "--" if np.isnan(gen) else f3(gen, 2),
                      f3(m.params["x"], 3), fp(m.pvalues["x"])])
     table(f"{tdir}/traj.tex", "lrrlrrr", r"Model & Captions & Seeds & Commit fraction by $s$ & Generic & Slope & $p$",
           rows, r"Share of the denoising trajectory before the Grad-PEC map of $\hat x_0$ settles "
