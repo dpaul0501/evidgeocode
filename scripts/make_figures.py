@@ -126,10 +126,11 @@ def edit_figure(edit_root, run_dir, out, gid):
 
     store = {}
     for p in glob(os.path.join(run_dir, "maps", "**", "*.npz"), recursive=True):
-        z = np.load(p)
-        for i, k in enumerate(z["keys"]):
+        with np.load(p) as z:
+            arrs = {f: z[f] for f in z.files}
+        for i, k in enumerate(arrs.pop("keys")):
             if f"/{gid}/" in str(k):
-                store[str(k)] = {f: z[f][i] for f in z.files if f != "keys"}
+                store[str(k)] = {f: a[i] for f, a in arrs.items()}
     mask = np.asarray(Image.open(os.path.join(edit_root, "edit", "masks", f"{gid:05d}_edit.png"))
                       .convert("L").resize((224, 224))) / 255.0
     cols = [("magicbrush/source", "guidance/edit/magicbrush/source", "Source"),

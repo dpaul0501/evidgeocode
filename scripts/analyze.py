@@ -105,9 +105,10 @@ def load(run: str, g: int):
     df.loc[has_step, "key"] = df.loc[has_step, "key"] + "/" + df.loc[has_step, "step"].astype(str)
     store = {}
     for p in glob(f"{run}/maps/**/*.npz", recursive=True):
-        z = np.load(p)
-        for i, k in enumerate(z["keys"]):
-            store[str(k)] = {f: z[f][i] for f in z.files if f != "keys"}
+        with np.load(p) as z:  # z[f] decompresses on every access: read each array once
+            arrs = {f: z[f] for f in z.files}
+        for i, k in enumerate(arrs.pop("keys")):
+            store[str(k)] = {f: a[i] for f, a in arrs.items()}
     ims = glob(f"{run}/imstats/*.parquet")
     if ims:  # prompt-free image statistics (scripts/image_stats.py)
         st = pd.concat([pd.read_parquet(p) for p in ims], ignore_index=True)
