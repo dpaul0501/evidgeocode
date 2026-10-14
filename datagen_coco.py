@@ -77,6 +77,9 @@ class Cfg:
     # Set True on the first run to create the frozen caption manifest only
     BUILD_MANIFEST_ONLY: bool = False
 
+    # Per-model first global_id to generate (to fill a partly finished shard)
+    MIN_GID: Dict[str, int] = field(default_factory=dict)
+
     # Models
     MODELS: Dict[str, str] = field(default_factory=lambda: {
         "sd14": "CompVis/stable-diffusion-v1-4",
@@ -85,6 +88,10 @@ class Cfg:
 
 
 cfg = Cfg()
+# Optional JSON overrides of any Cfg field, e.g. DATAGEN_OVERRIDES='{"SHARD_ID": 6}'
+for _k, _v in json.loads(os.environ.get("DATAGEN_OVERRIDES", "{}")).items():
+    assert hasattr(cfg, _k), f"unknown Cfg field {_k}"
+    setattr(cfg, _k, _v)
 assert 0 <= cfg.SHARD_ID < cfg.NUM_SHARDS, "SHARD_ID out of range"
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -242,6 +249,8 @@ for model_name, model_id in cfg.MODELS.items():
 
     try:
         for global_id in tqdm(shard_ids, desc=f"{model_name} shard {cfg.SHARD_ID}"):
+            if global_id < cfg.MIN_GID.get(model_name, 0):
+                continue
             init_img, caption = get_coco_item(global_id)
             seed = seed_for(global_id, model_name)
 
