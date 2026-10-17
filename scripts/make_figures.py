@@ -4,7 +4,8 @@
     python scripts/make_figures.py --out ieee_tai_paper/v2/figs \
         --run sd35=kaggle_out/sd35m_merged/results --run klein=results_klein/results \
         --run faces=results_tasks/faces/results --run edit=results_tasks/edit/results \
-        --edit-root results_tasks/edit
+        --edit-root results_tasks/edit \
+        [--run trajs=<dense SD3.5 trajectories> --run trajk=<dense FLUX.2 trajectories>]
 
 Palette: first four categorical slots of the reference palette, validated on
 white (CVD worst adjacent dE 9.1). Two slots are below 3:1 on white, so every
@@ -81,7 +82,10 @@ def guidance_figure(runs, out):
         for key, label, color, marker in SERIES:
             if key not in runs:
                 continue
-            pts = sweep_rows(os.path.join(runs[key], "guidance_sweep.csv"), measure)
+            run = runs[key]
+            if measure.endswith("traj_commit_frac"):  # dense trajectory runs replace the small sets
+                run = runs.get({"sd35": "trajs", "klein": "trajk"}.get(key, ""), run)
+            pts = sweep_rows(os.path.join(run, "guidance_sweep.csv"), measure)
             if pts is None or len(pts) < 2:
                 continue
             ax.plot(pts[:, 0], pts[:, 1], color=color, linewidth=2, marker=marker, markersize=5,
