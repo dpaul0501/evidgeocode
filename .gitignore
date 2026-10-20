@@ -17,3 +17,4 @@ results_main/*.tgz
 results_tasks/*.tgz
 kaggle/datasets/
 data_ext/
+.venv/

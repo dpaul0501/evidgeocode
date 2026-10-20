@@ -880,6 +880,69 @@ def write_numbers(out):
             f.write(f"\\expandafter\\def\\csname ev@{k}\\endcsname{{{fmt(NUM[k])}}}\n")
 
 
+def text_control(df, store, g, pairs, out):
+    """Real captioned images (memes) vs their generations, with the real image's text masked.
+
+    Real memes carry overlaid text that the generations lack, and CLIP maps are drawn to
+    text. For each caption the real image's OCR mask is applied to the real image and, as a
+    same-mask control, to every generation of that caption. Reports the share of evidence in
+    the text region and the Gini over non-text cells (renormalised), paired by caption with
+    seeds averaged. pairs: [(external dataset, guidance dataset, mask dir)].
+    """
+    rows = []
+    for ext, gds, mdir in pairs:
+        real = df[(df.corpus == "external") & (df.dataset == ext)].set_index("gid")
+        gen = df[(df.corpus == "guidance") & (df.dataset == gds)]
+        for gid, rr in real.iterrows():
+            mp = os.path.join(mdir, f"{int(gid):05d}_text.png")
+            if not os.path.exists(mp):
+                continue
+            cov = mask_grid(mp, g)
+            keep = (cov < 0.5).ravel()
+            if keep.sum() < 3:  # almost all text: nothing to compare
+                continue
+
+            def feats(key, sig):
+                k = f"g{g}_{sig}"
+                if key not in store or k not in store[key]:
+                    return np.nan, np.nan
+                m = M.normalize(store[key][k]).reshape(g, g)
+                rest = m.ravel()[keep]
+                return float((m * cov).sum()), float(M.gini(rest / max(rest.sum(), 1e-12)))
+
+            for mode, grp in gen[gen.gid == gid].groupby("mode"):
+                for sig in ("pec", "sal", "rollout", "loo", "ss"):
+                    gv = np.array([feats(k, sig) for k in grp.key], dtype=float)
+                    rv = feats(rr.key, sig)
+                    rows.append(dict(dataset=gds, mode=mode, gid=gid, signal=sig, text_area=float(cov.mean()),
+                                     real_text=rv[0], gen_text=np.nanmean(gv[:, 0]),
+                                     real_gini_notext=rv[1], gen_gini_notext=np.nanmean(gv[:, 1]),
+                                     real_gini=float(rr.get(f"{sig}_gini", np.nan)),
+                                     gen_gini=float(grp[f"{sig}_gini"].mean()) if f"{sig}_gini" in grp else np.nan))
+    per = pd.DataFrame(rows)
+    if per.empty:
+        return
+    per.to_csv(f"{out}/text_control_perimage.csv", index=False)
+    summ = []
+    for (ds, mode, sig), grp in per.groupby(["dataset", "mode", "signal"]):
+        r = dict(dataset=ds, mode=mode, signal=sig, n=len(grp), text_area=grp.text_area.mean())
+        for what in ("text", "gini", "gini_notext"):
+            res = paired(grp[f"real_{what}"], grp[f"gen_{what}"])
+            r.update({f"real_{what}": res["mean_a"], f"gen_{what}": res["mean_b"],
+                      f"{what}_dz": res["dz"], f"{what}_p": res["p_wilcoxon"]})
+        summ.append(r)
+    t = pd.DataFrame(summ)
+    for what in ("text", "gini", "gini_notext"):
+        t[f"{what}_p_holm"] = holm(t[f"{what}_p"])
+    for _, r in t.iterrows():
+        k = f"textctl_{r.dataset}_{r['mode']}_{r.signal}"
+        for col in ("n", "text_area", "real_text", "gen_text", "text_dz", "text_p_holm", "real_gini", "gen_gini",
+                    "gini_dz", "gini_p_holm", "real_gini_notext", "gen_gini_notext", "gini_notext_dz",
+                    "gini_notext_p_holm"):
+            put(f"{k}_{col.replace('_holm', '')}", int(r[col]) if col == "n" else float(r[col]))
+    t.to_csv(f"{out}/text_control.csv", index=False)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run-dir", required=True)
@@ -888,6 +951,8 @@ def main():
                     help="Generation folders with masks/ (inpainting, MagicBrush editing)")
     ap.add_argument("--correctness", default="",
                     help="CSV dataset,model,mode,gid,seed,correct for failure prediction")
+    ap.add_argument("--text-pairs", nargs="*", default=[],
+                    help="external_dataset:guidance_dataset:mask_dir, e.g. memes_real:memes:data_ext/memecap/text_masks")
     args = ap.parse_args()
     out = os.path.join(args.run_dir, "results")
     os.makedirs(out, exist_ok=True)
@@ -913,6 +978,7 @@ def main():
     mask_control(df, store, args.grid, args.gen_roots, out)
     edit_control(df, store, args.grid, args.gen_roots, out)
     confound(df, out)
+    text_control(df, store, args.grid, [tuple(p.split(":", 2)) for p in args.text_pairs], out)
     write_numbers(out)
     print(f"wrote {len(NUM)} numbers and {len(glob(out + '/*.csv'))} tables to {out}")
 
