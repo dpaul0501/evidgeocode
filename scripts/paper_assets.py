@@ -147,9 +147,14 @@ DS = {"multiguide_coco_v2": "v2", "multiguide_coco_v3": "v3", "multiguide_consis
       "inpaint": "inpaint", "edit": "edit", "faces": "faces", "kaggle_sd15sweep": "sweep", "kaggle_sd14sweep": "sweep"}
 
 
+REEVAL = {"siglip", "clipfaith"}  # re-evaluations of images another run already counts
+
+
 def t_corpus(runs, tdir):
-    rows = []
+    rows, n_final, n_traj = [], 0, 0
     for name in runs:
+        if name in REEVAL:
+            continue
         d = read(runs, name, "corpus_summary.csv")
         if d is None:
             continue
@@ -157,13 +162,20 @@ def t_corpus(runs, tdir):
             d = d[d.corpus != "real"]  # real photos are counted once, in the main run
         for (c, ds, m), g in d.groupby(["corpus", "dataset", "model"]):
             modes = ", ".join(esc(x) for x in g["mode"])
-            rows.append([esc(c), DS.get(ds, esc(ds)), MODEL.get(m, esc(m)), modes, f"{int(g.n.sum()):,}".replace(",", "{,}")])
-    total = sum(int(r[-1].replace("{,}", "")) for r in rows)
-    rows.append([r"\textbf{Total}", "", "", "", rf"\textbf{{{total:,}}}".replace(",", "{,}")])
+            n = int(g.n.sum())
+            if c == "trajectory":
+                n_traj += n
+            else:
+                n_final += n
+            rows.append([esc(c), DS.get(ds, esc(ds)), MODEL.get(m, esc(m)), modes, f"{n:,}".replace(",", "{,}")])
+    fmt = lambda v: f"{v:,}".replace(",", "{,}")  # noqa: E731
+    rows.append([r"\textbf{Total images}", "", "", "", rf"\textbf{{{fmt(n_final)}}}"])
+    rows.append([r"Trajectory previews", "", "", "", fmt(n_traj)])
     table(f"{tdir}/corpus.tex", "lllp{4.2cm}r", "Corpus & Split & Generator & Conditions & Images",
           rows, "EvidGeo composition. COCO-caption generations are paired with the real photograph of their caption; "
           "trajectory rows are intermediate $\\hat x_0$ previews, counted separately from final images.",
           "tab:corpus", star=True)
+    return n_final, n_traj
 
 
 def t_guidance(runs, tdir):
@@ -186,9 +198,9 @@ def t_guidance(runs, tdir):
 def t_sweep(runs, tdir):
     rows = []
     task = {"sd35": "T2I (COCO)", "klein": "T2I (COCO)", "qwen": "T2I (COCO)",
-            "edit": "Editing (MagicBrush)", "faces": "T2I (faces)", "sd15sw": "T2I (COCO v3)",
+            "edit": "Editing (MagicBrush)", "faces": "T2I (faces)", "memes": "T2I (memes)", "sd15sw": "T2I (COCO v3)",
             "sd14sw": "T2I (COCO v3)"}
-    for name in ("sd14sw", "sd15sw", "sd35", "klein", "qwen", "edit", "faces"):
+    for name in ("sd14sw", "sd15sw", "sd35", "klein", "qwen", "edit", "faces", "memes"):
         d = read(runs, name, "guidance_sweep.csv")
         if d is None:
             continue
@@ -315,14 +327,14 @@ def t_maskctl(runs, tdir):
 
 def t_confound(runs, tdir):
     rows = []
-    for name in ("main", "sd35", "klein", "faces", "edit", "sd15sw", "sd14sw", "siglip"):
+    for name in ("main", "sd35", "klein", "faces", "memes", "edit", "sd15sw", "sd14sw", "siglip"):
         d = read(runs, name, "confound.csv")
         if d is None:
             continue
         for _, r in d.iterrows():
             if r.model in ("biggan", "magicbrush") or r.design == "logcfg_s>=2":
                 continue
-            task = {"main": f"COCO ({DS.get(r.dataset, r.dataset)})", "faces": "faces", "edit": "editing",
+            task = {"main": f"COCO ({DS.get(r.dataset, r.dataset)})", "faces": "faces", "memes": "memes", "edit": "editing",
                     "sd15sw": "COCO (v3)", "sd14sw": "COCO (v3)"}.get(
                 name, "COCO")
             design = {"text_vs_weak": "caption vs generic", "logcfg": r"$\log s$ sweep"}.get(r.design, esc(r.design))
@@ -366,6 +378,7 @@ def t_editctl(runs, tdir):
 def t_traj(runs, tdir):
     rows = []
     for name, lab in (("sd35", "SD~3.5-M (COCO)"), ("klein", "FLUX.2 (COCO)"), ("faces", "FLUX.2 (faces)"),
+                      ("memes", "FLUX.2 (memes)"),
                       ("trajs", "SD~3.5-M (COCO, dense)"), ("trajk", "FLUX.2 (COCO, dense)")):
         tp = os.path.join(runs.get(name, ""), "uncertainty_trajectory.csv")
         if name not in runs or not os.path.exists(tp):
@@ -383,6 +396,28 @@ def t_traj(runs, tdir):
                 r"fixed effects and caption-clustered errors; not corrected for multiple tests.", "tab:traj", star=True)
 
 
+def t_textctl(runs, tdir):
+    d = read(runs, "memes", "text_control.csv")
+    rows = []
+    if d is not None:
+        lab = {"pec": "Grad-PEC", "sal": "Saliency", "loo": "LOO"}
+        order = {m: i for i, m in enumerate(["cfg1", "cfg4", "cfg8", "generic"])}
+        d = d[d.signal.isin(["pec", "loo"])].assign(o=lambda x: x["mode"].map(order)).sort_values(["signal", "o"])
+        for _, r in d.iterrows():
+            mode = "generic" if r["mode"] == "generic" else f"$s{{=}}{r['mode'][3:]}$"
+            rows.append([lab[r.signal], mode, str(int(r.n)), f3(r.text_area, 2), f3(r.real_text), f3(r.gen_text),
+                         fp(r.text_p_holm), f3(r.real_gini), f3(r.gen_gini), fp(r.gini_p_holm),
+                         f3(r.real_gini_notext), f3(r.gen_gini_notext), fp(r.gini_notext_p_holm)])
+    table(f"{tdir}/textctl.tex", "llrrrrrrrrrrr",
+          r"Map & Generation & $n$ & Text & \multicolumn{3}{c}{Share in text region} & "
+          r"\multicolumn{3}{c}{Gini} & \multicolumn{3}{c}{Gini without text} \\ "
+          r"& & & area & Real & Gen. & $p$ & Real & Gen. & $p$ & Real & Gen. & $p$",
+          rows, r"Real MemeCap memes vs.\ FLUX.2 generations of their literal image caption (seeds averaged). "
+                r"The real meme's OCR text mask is applied to both, so the generation is a same-mask control; "
+                r"``without text'' renormalises the map over non-text cells. Paired by caption, Holm-corrected.",
+          "tab:textctl", star=True, size=r"\footnotesize")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
@@ -393,7 +428,7 @@ def main():
     n = write_numbers(runs, a.out)
     td = os.path.join(a.out, "tables")
     for fn in (t_corpus, t_guidance, t_sweep, t_stability, t_faith, t_detection, t_realgen, t_masks, t_maskctl,
-               t_confound, t_editctl, t_traj):
+               t_confound, t_editctl, t_traj, t_textctl):
         fn(runs, td)
     print(f"{n} numbers, {len(os.listdir(td))} tables -> {a.out}")
 
