@@ -400,22 +400,23 @@ def t_textctl(runs, tdir):
     d = read(runs, "memes", "text_control.csv")
     rows = []
     if d is not None:
-        lab = {"pec": "Grad-PEC", "sal": "Saliency", "loo": "LOO"}
+        lab = {"pec": "Grad-PEC", "loo": "LOO"}
         order = {m: i for i, m in enumerate(["cfg1", "cfg4", "cfg8", "generic"])}
         d = d[d.signal.isin(["pec", "loo"])].assign(o=lambda x: x["mode"].map(order)).sort_values(["signal", "o"])
         for _, r in d.iterrows():
-            mode = "generic" if r["mode"] == "generic" else f"$s{{=}}{r['mode'][3:]}$"
-            rows.append([lab[r.signal], mode, str(int(r.n)), f3(r.text_area, 2), f3(r.real_text), f3(r.gen_text),
-                         fp(r.text_p_holm), f3(r.real_gini), f3(r.gen_gini), fp(r.gini_p_holm),
+            mode = "gen." if r["mode"] == "generic" else r["mode"][3:]
+            rows.append([lab[r.signal], mode, f3(r.real_text, 2), f3(r.gen_text, 2), fp(r.text_p_holm),
                          f3(r.real_gini_notext), f3(r.gen_gini_notext), fp(r.gini_notext_p_holm)])
-    table(f"{tdir}/textctl.tex", "llrrrrrrrrrrr",
-          r"Map & Generation & $n$ & Text & \multicolumn{3}{c}{Share in text region} & "
-          r"\multicolumn{3}{c}{Gini} & \multicolumn{3}{c}{Gini without text} \\ "
-          r"& & & area & Real & Gen. & $p$ & Real & Gen. & $p$ & Real & Gen. & $p$",
-          rows, r"Real MemeCap memes vs.\ FLUX.2 generations of their literal image caption (seeds averaged). "
-                r"The real meme's OCR text mask is applied to both, so the generation is a same-mask control; "
-                r"``without text'' renormalises the map over non-text cells. Paired by caption, Holm-corrected.",
-          "tab:textctl", star=True, size=r"\footnotesize")
+        n, area = int(d.n.min()), float(d.text_area.mean())
+    else:
+        n, area = 0, float("nan")
+    table(f"{tdir}/textctl.tex", "llrrrrrr",
+          r"Map & $s$ & \multicolumn{3}{c}{Share in text} & \multicolumn{3}{c}{Gini without text} \\ "
+          r"& & Real & Gen. & $p$ & Real & Gen. & $p$",
+          rows, rf"Real MemeCap memes vs.\ FLUX.2 generations of their literal caption ($n={n}$ captions, seeds "
+                rf"averaged; text covers {f3(area, 2)} of the grid). The real meme's OCR text mask is applied to both "
+                r"images; ``without text'' renormalises the map over non-text cells. Paired by caption, "
+                r"Holm-corrected.", "tab:textctl", size=r"\scriptsize")
 
 
 def main():
