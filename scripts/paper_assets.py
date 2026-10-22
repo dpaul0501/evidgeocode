@@ -73,7 +73,7 @@ def tex_value(v, key: str = "") -> str:
 
 
 def traj_fit(t: pd.DataFrame, sig: str = "pec"):
-    """Commit fraction ~ log s + C(caption), seeds averaged per caption and scale, caption-clustered SEs.
+    """Commit fraction ~ log s + C(caption), seeds averaged per caption and scale, SEs clustered by image.
 
     Same model as analyze.py's guidance_sweep, so the table, the text and the CSVs agree.
     """
@@ -82,9 +82,12 @@ def traj_fit(t: pd.DataFrame, sig: str = "pec"):
     c = t[t["mode"].str.match(r"^cfg[0-9.]+$")].copy()
     c["s"] = c["mode"].str[3:].astype(float)
     col = f"{sig}_traj_commit_frac"
-    per = c.groupby(["gid", "s"])[col].mean().reset_index()
+    if "unit" not in c:
+        c["unit"] = c["gid"].astype(str)
+    per = c.groupby(["gid", "unit", "s"])[col].mean().reset_index()
     per["logcfg"] = np.log(per.s)
-    fit = smf.ols(f"{col} ~ logcfg + C(gid)", data=per).fit(cov_type="cluster", cov_kwds={"groups": per.gid})
+    fit = smf.ols(f"{col} ~ logcfg + C(gid)", data=per).fit(cov_type="cluster",
+                                                         cov_kwds={"groups": pd.factorize(per.unit)[0]})
     return per, float(fit.params["logcfg"]), float(fit.pvalues["logcfg"])
 
 
@@ -191,7 +194,7 @@ def t_guidance(runs, tdir):
     table(f"{tdir}/guidance.tex", "llcr" + "rr" * 3,
           r"Split & Model & Contrast & $n$ & \multicolumn{2}{c}{Grad-PEC} & \multicolumn{2}{c}{Rollout} & "
           r"\multicolumn{2}{c}{SpatialShap} \\ & & & & $d_z$ & $p$ & $d_z$ & $p$ & $d_z$ & $p$",
-          rows, r"Guidance contrasts in evidence concentration (Gini), paired by prompt. $d_z$: paired "
+          rows, r"Guidance contrasts in evidence concentration (Gini), averaged within and paired by COCO image. $d_z$: paired "
                 r"effect size; $p$: Holm-corrected over all reported tests.", "tab:guidance", star=True)
 
 
@@ -213,7 +216,7 @@ def t_sweep(runs, tdir):
     table(f"{tdir}/sweep.tex", "lllllrr",
           r"Task & Model & Measure & Guidance $s$ & Mean per $s$ & Slope ($\log s$) & $p$", rows,
           r"Guidance sweeps on current models. Slopes from $y\sim\log s+\text{prompt}$ fixed effects, "
-          r"prompt-clustered errors.", "tab:sweep", star=True)
+          r"errors clustered by source image.", "tab:sweep", star=True)
 
 
 def t_stability(runs, tdir):
@@ -224,7 +227,7 @@ def t_stability(runs, tdir):
             rows.append([esc(r.measure), f"{r.a}$-${r.b}", str(int(r.n)), f3(r.mean_a, 4), f3(r.mean_b, 4),
                          f3(r.dz, 2), fp(r.p_holm)])
     table(f"{tdir}/stability.tex", "llrrrrr", r"Measure & Contrast & $n$ & Mean $a$ & Mean $b$ & $d_z$ & $p$",
-          rows, "Cross-seed stability on the consistency corpus (150 prompts, 3 seeds per mode), paired by prompt.",
+          rows, "Cross-seed stability on the consistency corpus (150 prompts, 3 seeds per mode); prompts averaged within and paired by source image.",
           "tab:stability")
 
 
@@ -291,7 +294,7 @@ def t_realgen(runs, tdir):
             rows.append([DS.get(r.dataset, r.dataset), MODEL.get(r.model, r.model), esc(r["mode"]), str(int(r.n)),
                          f3(r.mean_a), f3(r.mean_b), f3(r.dz, 2), fp(r.p_holm)])
     table(f"{tdir}/realgen.tex", "lllrrrrr", r"Split & Model & Mode & $n$ & Gini gen. & Gini real & $d_z$ & $p$", rows,
-          "Generated vs.\\ paired real photograph (Grad-PEC Gini), paired by caption.", "tab:realgen")
+          "Generated vs.\\ paired real photograph (Grad-PEC Gini); captions of one photograph are averaged, so $n$ counts photographs.", "tab:realgen")
 
 
 def t_masks(runs, tdir):
@@ -352,7 +355,8 @@ def t_confound(runs, tdir):
                 r"prompt-free saliency map, and of a Sobel edge map; the prompt-specific residual "
                 r"(Grad-PEC $-$ saliency); and the Grad-PEC effect after adjusting for image statistics "
                 r"(edge Gini and centre share, RMS contrast, colourfulness, high-frequency energy, saturation). "
-                r"Caption fixed effects, caption-clustered errors, Holm-corrected $p$; $n_c$ = captions.",
+                r"Caption fixed effects, errors clustered by source image (COCO captions share photographs), "
+                r"Holm-corrected $p$; $n_c$ = captions.",
           "tab:confound", star=True, size=r"\scriptsize")
 
 
@@ -393,7 +397,7 @@ def t_traj(runs, tdir):
     table(f"{tdir}/traj.tex", "lrrlrrr", r"Model & Captions & Seeds & Commit fraction by $s$ & Generic & Slope & $p$",
           rows, r"Share of the denoising trajectory before the Grad-PEC map of $\hat x_0$ settles "
                 r"(JSD to final $\le 0.05$). Seeds are averaged per caption and scale; slope on $\log s$ with caption "
-                r"fixed effects and caption-clustered errors; not corrected for multiple tests.", "tab:traj", star=True)
+                r"fixed effects and errors clustered by source image; not corrected for multiple tests.", "tab:traj", star=True)
 
 
 def t_textctl(runs, tdir):

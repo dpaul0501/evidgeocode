@@ -118,7 +118,28 @@ def load(run: str, g: int):
     if "label" not in df:
         df["label"] = ""
     df["label"] = df["label"].fillna("")
-    return df.rename(columns=rename), store
+    return add_units(df.rename(columns=rename)), store
+
+
+COCO_IDS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "coco_master_cocoid.json")
+
+
+def add_units(df: pd.DataFrame) -> pd.DataFrame:
+    """unit = the independent sampling unit for tests.
+
+    The COCO caption source has five captions per photograph (1,000 images for 5,000
+    rows), so captions of one photo are not independent: COCO-derived rows get the
+    COCO image id as unit, every other corpus its own caption id. Paired tests average
+    captions within a unit; regressions keep caption fixed effects and cluster by unit.
+    """
+    ids = json.load(open(COCO_IDS))["cocoid"] if os.path.exists(COCO_IDS) else []
+    hr = df["hf_row"].fillna(-1).astype(int) if "hf_row" in df else pd.Series(-1, index=df.index)
+    coco = (hr >= 0) & (hr < len(ids))
+    df["image_id"] = -1
+    df.loc[coco, "image_id"] = [ids[h] for h in hr[coco]]
+    df["unit"] = np.where(coco, "coco" + df["image_id"].astype(str),
+                          df["dataset"].astype(str) + "#" + df["gid"].astype(str))
+    return df
 
 
 # -------------------------------------------------------------- analyses
@@ -131,6 +152,8 @@ def corpus_summary(df, out):
     put("n_consistency", int((df.corpus == "consistency").sum()))
     put("n_real", int((df.corpus == "real").sum()))
     put("n_prompts_guidance", int(gen.hf_row.nunique()))
+    put("n_images_guidance", int(gen.loc[gen.image_id >= 0, "image_id"].nunique()))
+    put("n_real_images", int(df.loc[(df.corpus == "real") & (df.image_id >= 0), "image_id"].nunique()))
     for (ds, m, mo), n in gen.groupby(["dataset", "model", "mode"]).size().items():
         put(f"n_{ds}_{m}_{mo}", int(n))
     return t
@@ -164,7 +187,7 @@ def guidance_tests(df, out):
             col = f"{s}_gini"
             if col not in grp:
                 continue
-            wide = grp.pivot_table(index="gid", columns="mode", values=col)
+            wide = grp.pivot_table(index="unit", columns="mode", values=col)
             for a, b in PAIRS:
                 if a in wide and b in wide:
                     rows.append(dict(dataset=ds, model=m, signal=s, a=a, b=b,
@@ -250,7 +273,7 @@ def smoothing(df, out):
             r["mass_leak_unnormalised"] = g[f"{name}_leak"].mean()
         dzs = []
         for (_, _), grp in g.groupby(["dataset", "model"]):
-            w = grp.pivot_table(index="gid", columns="mode", values=f"{name}_gini")
+            w = grp.pivot_table(index="unit", columns="mode", values=f"{name}_gini")
             if "text" in w and "weak" in w:
                 dzs.append(paired(w["text"], w["weak"]).get("dz", np.nan))
         r["text_vs_weak_dz_mean"] = np.nanmean(dzs) if dzs else np.nan
@@ -302,6 +325,7 @@ def grid_ablation(run, out):
     df = pd.concat([pd.read_parquet(p) for p in glob(f"{run}/features/guidance/**/*.parquet",
                                                      recursive=True)], ignore_index=True)
     grids = sorted({int(c.split("_")[0][1:]) for c in df.columns if c[0] == "g" and c[1].isdigit()})
+    df = add_units(df)
     rows = []
     for gr in grids:
         for s in ("pec", "ss", "rollout"):
@@ -309,7 +333,7 @@ def grid_ablation(run, out):
             if col not in df:
                 continue
             for (ds, m), grp in df.groupby(["dataset", "model"]):
-                w = grp.pivot_table(index="gid", columns="mode", values=col)
+                w = grp.pivot_table(index="unit", columns="mode", values=col)
                 if "text" in w and "weak" in w:
                     rows.append(dict(grid=gr, signal=s, dataset=ds, model=m,
                                      **paired(w["text"], w["weak"])))
@@ -328,7 +352,7 @@ def stability(df, store, out):
         emb = emb / np.linalg.norm(emb, axis=1, keepdims=True)
         ss = [store[k]["g7_ss"] if "g7_ss" in store[k] else None for k in grp.key]
         jsds = [M.jsd(a, b) for a, b in combinations(ss, 2)] if ss[0] is not None else [np.nan]
-        rows.append(dict(mode=mode, gid=pid, n_seeds=len(grp),
+        rows.append(dict(mode=mode, gid=pid, unit=grp.unit.iloc[0], n_seeds=len(grp),
                          sem_var=float(((emb - emb.mean(0)) ** 2).sum(1).mean()),
                          pec_gini_mean=grp.pec_gini.mean(), pec_gini_var=grp.pec_gini.var(ddof=1),
                          ss_gini_mean=grp.ss_gini.mean() if "ss_gini" in grp else np.nan,
@@ -344,7 +368,7 @@ def stability(df, store, out):
     tests = []
     for a, b in PAIRS:
         for m in ("sem_var", "flow_jsd", "pec_gini_var"):
-            w = per.pivot_table(index="gid", columns="mode", values=m)
+            w = per.pivot_table(index="unit", columns="mode", values=m)
             if a in w and b in w:
                 res = paired(w[a], w[b])
                 tests.append(dict(measure=m, a=a, b=b, **res))
@@ -375,14 +399,14 @@ def stability(df, store, out):
 
 
 def real_vs_generated(df, out):
-    real = df[df.corpus == "real"].set_index("hf_row")
+    real = df[df.corpus == "real"].groupby("unit").mean(numeric_only=True)
     gen = df[df.corpus == "guidance"]
     if real.empty:
         return
     rows = []
     for (ds, m, mo), grp in gen.groupby(["dataset", "model", "mode"]):
         # multi-seed corpora: one value per prompt before pairing with its real image
-        grp = grp[grp.hf_row >= 0].groupby("hf_row").mean(numeric_only=True)
+        grp = grp[grp.hf_row >= 0].groupby("unit").mean(numeric_only=True)
         idx = grp.index.intersection(real.index)
         for s in ("pec", "ss", "rollout"):
             res = paired(grp.loc[idx, f"{s}_gini"], real.loc[idx, f"{s}_gini"])
@@ -433,7 +457,7 @@ def detection(df, store, out):
         if d[target].nunique() < 2:
             continue
         y = d[target].to_numpy()
-        groups = d.hf_row.to_numpy()
+        groups = d.unit.to_numpy()  # all captions and the real photo of one image stay in one fold
         if len(set(groups)) < 5:  # GroupKFold(5) needs at least 5 prompts
             continue
         emb = np.stack([store[k]["clip_emb"] for k in d.key])
@@ -460,7 +484,7 @@ def seed_uncertainty(df, store, g, out):
     for (c, ds, m, mo, gid), grp in multi.groupby(["corpus", "dataset", "model", "mode", "gid"]):
         if grp.seed.nunique() < 2:
             continue
-        r = dict(corpus=c, dataset=ds, model=m, mode=mo, gid=gid, n_seeds=grp.seed.nunique(),
+        r = dict(corpus=c, dataset=ds, model=m, mode=mo, gid=gid, unit=grp.unit.iloc[0], n_seeds=grp.seed.nunique(),
                  clipscore_mean=grp.clipscore.mean())
         embs = np.stack([store[k]["clip_emb"] for k in grp.key])
         for sig in ("pec", "ss"):
@@ -479,7 +503,7 @@ def seed_uncertainty(df, store, g, out):
     tests = []
     for (c, ds, m), grp in per.groupby(["corpus", "dataset", "model"]):
         for col in cols:
-            w = grp.pivot_table(index="gid", columns="mode", values=col)
+            w = grp.pivot_table(index="unit", columns="mode", values=col)
             for a, b in PAIRS:
                 if a in w and b in w:
                     tests.append(dict(corpus=c, dataset=ds, model=m, score=col, a=a, b=b,
@@ -501,7 +525,7 @@ def trajectory(df, store, g, out):
         grp = grp.sort_values("step")
         if len(grp) < 3:
             continue
-        r = dict(dataset=ds, model=m, mode=mo, gid=gid, seed=seed, n_steps=len(grp))
+        r = dict(dataset=ds, model=m, mode=mo, gid=gid, unit=grp.unit.iloc[0], seed=seed, n_steps=len(grp))
         for sig in ("pec", "ss"):
             f = f"g{g}_{sig}"
             if f in store[grp.key.iloc[0]]:
@@ -614,18 +638,20 @@ def guidance_sweep(df, seed_per, out, traj_per=None):
         if col not in src:
             continue
         for (ds, m), grp in src.groupby(["dataset", "model"]):
-            per = grp.groupby(["gid", "cfg"])[col].mean().reset_index()
+            unit = src["unit"] if "unit" in src else src["gid"].astype(str)
+            per = grp.assign(unit=unit).groupby(["gid", "unit", "cfg"])[col].mean().reset_index()
             means = per.groupby("cfg")[col].mean()
             if len(means) < 3:
                 continue
             rho = stats.spearmanr(means.index, means.values).statistic
-            r = dict(dataset=ds, model=m, measure=col, n_prompts=per.gid.nunique(),
+            r = dict(dataset=ds, model=m, measure=col, n_prompts=per.gid.nunique(), n_units=per.unit.nunique(),
                      n_scales=len(means), spearman_means=rho,
                      **{f"mean_cfg{k:g}": v for k, v in means.items()})
             if smf is not None and per.gid.nunique() > 2:
                 per["logcfg"] = np.log(per.cfg)
+                groups = pd.factorize(per.unit)[0]  # caption fixed effects, image-clustered errors
                 fit = smf.ols(f"{col} ~ logcfg + C(gid)", data=per).fit(cov_type="cluster",
-                                                                      cov_kwds={"groups": per.gid})
+                                                                      cov_kwds={"groups": groups})
                 r.update(slope_logcfg=fit.params["logcfg"], p=fit.pvalues["logcfg"])
                 put(f"sweep_{ds}_{m}_{col}_slope", float(fit.params["logcfg"]))
                 put(f"sweep_{ds}_{m}_{col}_p", float(fit.pvalues["logcfg"]))
@@ -717,7 +743,7 @@ def mask_control(df, store, g, gen_roots, out):
                 hr = grp.hf_row.iloc[0]
                 rk = [real.loc[hr, "key"]] if hr in real.index else []
                 for sig in ("pec", "rollout", "loo", "ss"):
-                    rows.append(dict(dataset=ds, mask=kind, gid=gid, signal=sig, area=float(cov.mean()),
+                    rows.append(dict(dataset=ds, mask=kind, gid=gid, unit=grp.unit.iloc[0], signal=sig, area=float(cov.mean()),
                                      inpaint=inside(grp.key, sig), i2i=inside(i2i.key, sig), real=inside(rk, sig)))
     per = pd.DataFrame(rows)
     if per.empty:
@@ -725,6 +751,7 @@ def mask_control(df, store, g, gen_roots, out):
     per.to_csv(f"{out}/mask_control_perimage.csv", index=False)
     summ = []
     for (ds, kind, sig), grp in per.groupby(["dataset", "mask", "signal"]):
+        grp = grp.groupby("unit")[["area", "inpaint", "i2i", "real"]].mean()  # one value per image
         r = dict(dataset=ds, mask=kind, signal=sig, n=len(grp), area=grp.area.mean(),
                  inpaint=grp.inpaint.mean(), i2i=grp.i2i.mean(), real=grp.real.mean())
         for ref in ("real", "i2i"):
@@ -765,15 +792,15 @@ def confound(df, out):
 
     def fit(d, term, y, extra):
         """Caption fixed effects via the within transformation (demean by caption),
-        caption-clustered SEs. Equivalent to y ~ x + C(gid) but stable for
-        thousands of captions."""
+        SEs clustered by unit (the image, for COCO captions). Equivalent to
+        y ~ x + C(gid) but stable for thousands of captions."""
         import statsmodels.api as sm
 
         cols = [term] + list(extra)
         d = d.dropna(subset=[y] + cols)
         dm = d[[y] + cols] - d.groupby("gid")[[y] + cols].transform("mean")
         keep = [c for c in cols if dm[c].std() > 1e-12]
-        m = sm.OLS(dm[y], dm[keep]).fit(cov_type="cluster", cov_kwds={"groups": d.gid})
+        m = sm.OLS(dm[y], dm[keep]).fit(cov_type="cluster", cov_kwds={"groups": pd.factorize(d.unit)[0]})
         lo, hi = m.conf_int().loc[term]
         return m.params[term], lo, hi, m.pvalues[term]
 
@@ -794,7 +821,8 @@ def confound(df, out):
             d = d.dropna(subset=["pec_gini", "sal_gini"])
             if d.gid.nunique() < 5:
                 continue
-            r = dict(dataset=ds, model=model, design=name, n=len(d), n_prompts=d.gid.nunique())
+            r = dict(dataset=ds, model=model, design=name, n=len(d), n_prompts=d.gid.nunique(),
+                     n_units=d.unit.nunique())
             for y in ("pec_gini", "sal_gini", "edge_gini", "resid"):
                 if y in d and d[y].notna().all():
                     b, lo, hi, p = fit(d, term, y, [])
