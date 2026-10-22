@@ -19,16 +19,19 @@ ap.add_argument("--jsonl", required=True)
 ap.add_argument("--out", required=True)
 ap.add_argument("--pad", type=float, default=0.01)
 ap.add_argument("--min-conf", type=float, default=0.3)
+ap.add_argument("--gpu", action="store_true")
 a = ap.parse_args()
 
 import easyocr  # noqa: E402
 
-reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+reader = easyocr.Reader(["en"], gpu=a.gpu, verbose=False)
 os.makedirs(a.out, exist_ok=True)
 rows = []
+base = os.path.dirname(os.path.abspath(a.jsonl))
 for line in open(a.jsonl):
     r = json.loads(line)
-    im = Image.open(r["image"]).convert("RGB")
+    path = r["image"] if os.path.isabs(r["image"]) else os.path.join(base, r["image"])
+    im = Image.open(path).convert("RGB")
     w, h = im.size
     pad = a.pad * min(w, h)
     m = Image.new("L", (w, h), 0)

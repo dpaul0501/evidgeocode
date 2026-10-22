@@ -24,6 +24,7 @@ scipy>=1.11
 networkx>=3.0
 statsmodels>=0.14
 pyarrow
+easyocr      # OCR text masks for captioned real images (memes)
 
 # Utilities
 numpy>=1.24
