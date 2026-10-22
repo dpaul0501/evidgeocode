@@ -35,3 +35,16 @@ def test_text_control_detects_text_evidence(tmp_path):
     assert r.n == 8 and abs(r.text_area - 2 / 7) < 1e-6
     assert r.real_text > 0.8 and 0.2 < r.gen_text < 0.4  # generations get ~area share by chance
     assert r.real_gini > r.gen_gini  # raw comparison is driven by text
+
+
+def test_external_pairs_averages_seeds(tmp_path):
+    rows = []
+    for gid in range(6):
+        rows.append(dict(corpus="external", dataset="faces_real", model="real", mode="real", gid=gid, pec_gini=0.5))
+        for seed, v in enumerate((0.2, 0.4)):  # seed mean 0.3, always below the real 0.5
+            rows.append(dict(corpus="guidance", dataset="faces", model="flux", mode="cfg4", gid=gid, seed=seed,
+                             pec_gini=v + 0.01 * gid))
+    A.NUM.clear()
+    A.external_pairs(pd.DataFrame(rows), [("faces_real", "faces")], str(tmp_path))
+    r = pd.read_csv(tmp_path / "external_pairs.csv").iloc[0]
+    assert r.n == 6 and abs(r.mean_b - 0.5) < 1e-9 and abs(r.mean_a - 0.325) < 1e-9

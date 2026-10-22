@@ -880,6 +880,35 @@ def write_numbers(out):
             f.write(f"\\expandafter\\def\\csname ev@{k}\\endcsname{{{fmt(NUM[k])}}}\n")
 
 
+def external_pairs(df, pairs, out):
+    """Generated vs. the paired real image of an external corpus (faces, memes), by caption.
+
+    Like real_vs_generated for COCO: seeds averaged per caption, then a paired test per
+    generation condition and map. pairs: [(external dataset, guidance dataset)].
+    """
+    rows = []
+    for ext, gds in pairs:
+        real = df[(df.corpus == "external") & (df.dataset == ext)].groupby("gid").mean(numeric_only=True)
+        gen = df[(df.corpus == "guidance") & (df.dataset == gds)]
+        for (m, mo), grp in gen.groupby(["model", "mode"]):
+            grp = grp.groupby("gid").mean(numeric_only=True)
+            idx = grp.index.intersection(real.index)
+            for s in ("pec", "sal", "rollout", "loo", "ss"):
+                c = f"{s}_gini"
+                if c in grp and c in real:
+                    res = paired(grp.loc[idx, c], real.loc[idx, c])
+                    rows.append(dict(dataset=gds, model=m, mode=mo, signal=s, **res))
+    t = pd.DataFrame(rows)
+    if t.empty:
+        return
+    t["p_holm"] = holm(t["p_wilcoxon"])
+    t.to_csv(f"{out}/external_pairs.csv", index=False)
+    for _, r in t.iterrows():
+        k = f"extpair_{r.dataset}_{r['mode']}_{r.signal}"
+        for col in ("n", "mean_a", "mean_b", "dz", "p_holm"):
+            put(f"{k}_{col.replace('_holm', '')}", int(r[col]) if col == "n" else float(r[col]))
+
+
 def text_control(df, store, g, pairs, out):
     """Real captioned images (memes) vs their generations, with the real image's text masked.
 
@@ -953,6 +982,8 @@ def main():
                     help="CSV dataset,model,mode,gid,seed,correct for failure prediction")
     ap.add_argument("--text-pairs", nargs="*", default=[],
                     help="external_dataset:guidance_dataset:mask_dir, e.g. memes_real:memes:data_ext/memecap/text_masks")
+    ap.add_argument("--real-pairs", nargs="*", default=[],
+                    help="external_dataset:guidance_dataset, e.g. mmceleba_real:mmceleba")
     args = ap.parse_args()
     out = os.path.join(args.run_dir, "results")
     os.makedirs(out, exist_ok=True)
@@ -978,6 +1009,7 @@ def main():
     mask_control(df, store, args.grid, args.gen_roots, out)
     edit_control(df, store, args.grid, args.gen_roots, out)
     confound(df, out)
+    external_pairs(df, [tuple(p.split(":", 1)) for p in args.real_pairs], out)
     text_control(df, store, args.grid, [tuple(p.split(":", 2)) for p in args.text_pairs], out)
     write_numbers(out)
     print(f"wrote {len(NUM)} numbers and {len(glob(out + '/*.csv'))} tables to {out}")
