@@ -40,6 +40,11 @@ def parse_args():
     ap.add_argument("--master-manifest", required=True)
     ap.add_argument("--prompts-jsonl", default="",
                     help="Benchmark prompts {global_id, caption} instead of COCO (no real pairs, no i2i)")
+    ap.add_argument("--init-jsonl", default="",
+                    help="{global_id, image} init photographs for i2i/inpainting (path relative to the file); "
+                         "lets i2i run with --prompts-jsonl")
+    ap.add_argument("--generic-guidance", type=float, default=None,
+                    help="Guidance for the generic prompt (generic/weak modes); default: the model's own")
     ap.add_argument("--out", required=True)
     ap.add_argument("--first-gid", type=int, default=0)
     ap.add_argument("--n-prompts", type=int, default=1000)
@@ -93,9 +98,13 @@ def jobs_for(args, spec):
         if m == "sweep":
             modes += [(f"cfg{g:g}", g, "caption") for g in sweep]
         elif m == "generic":
-            modes.append(("generic", spec.default_guidance, "generic"))
+            modes.append(("generic", args.generic_guidance or spec.default_guidance, "generic"))
+        elif m == "text":  # v2 names: caption at the model's default guidance ...
+            modes.append(("text", spec.default_guidance, "caption"))
+        elif m == "weak":  # ... and the generic prompt at --generic-guidance
+            modes.append(("weak", args.generic_guidance or spec.default_guidance, "generic"))
         elif m == "i2i":
-            if args.prompts_jsonl or not spec.has_i2i:
+            if (args.prompts_jsonl and not args.init_jsonl) or not spec.has_i2i:
                 print(f"skipping i2i for {spec.name}")
                 continue
             modes.append(("i2i", spec.default_guidance, "caption"))
@@ -186,7 +195,11 @@ def main():
           f"= {len(gids) * len(modes) * args.seeds} images")
 
     coco = None
-    if any(m[0] == "i2i" or m[0].startswith("inpaint") for m in modes):
+    if args.init_jsonl and any(m[0] == "i2i" or m[0].startswith("inpaint") for m in modes):
+        base = os.path.dirname(os.path.abspath(args.init_jsonl))
+        paths = {int(r["global_id"]): os.path.join(base, r["image"]) for r in D.read_jsonl(args.init_jsonl)}
+        coco = {g: {"image": Image.open(paths[g])} for g in gids}  # lazy: PIL reads pixels on use
+    elif any(m[0] == "i2i" or m[0].startswith("inpaint") for m in modes):
         from datasets import load_dataset
 
         coco = load_dataset(args.hf_dataset, split=args.hf_split).shuffle(
