@@ -110,7 +110,7 @@ def write_numbers(runs: dict, out: str):
                 lines.append(rf"\expandafter\def\csname ev@{name}:traj_{mode}_{sig}_commit\endcsname"
                              rf"{{{tex_value(float(g[f'{sig}_traj_commit_frac'].mean()))}}}")
         lines.append(rf"\expandafter\def\csname ev@{name}:traj_n_prompts\endcsname{{{t.gid.nunique()}}}")
-        if t["mode"].str.match(r"^cfg[0-9.]+$").sum() and t.loc[t["mode"].str.match(r"^cfg[0-9.]+$"), "mode"].nunique() >= 3:
+        if t["mode"].str.match(r"^cfg[0-9.]+$").sum() and t.loc[t["mode"].str.match(r"^cfg[0-9.]+$"), "mode"].nunique() >= 2:
             for sig in ("pec", "ss"):
                 _, slope, p = traj_fit(t, sig)
                 for k, v in (("slope", slope), ("p", p)):
@@ -144,10 +144,12 @@ def table(path, cols, header, rows, caption, label, star=False, size=None):
 
 MODEL = {"sd14": "SD~1.4", "sd15": "SD~1.5", "biggan": "BigGAN", "sd35-medium": "SD~3.5-M",
          "flux2-klein-base": "FLUX.2-klein", "qwen-image": "Qwen-Image", "sd": "SD (cons.)",
-         "coco": "COCO (real)", "magicbrush": "MagicBrush (ref.)"}
+         "coco": "COCO (real)", "magicbrush": "MagicBrush (ref.)", "real": "real"}
 DS = {"multiguide_coco_v2": "v2", "multiguide_coco_v3": "v3", "multiguide_consistency": "stab.",
       "Erland__coco_captions_small": "real", "kaggle_sd35m": "ext.", "coco": "ext.",
-      "inpaint": "inpaint", "edit": "edit", "faces": "faces", "kaggle_sd15sweep": "sweep", "kaggle_sd14sweep": "sweep"}
+      "inpaint": "inpaint", "edit": "edit", "faces": "faces", "kaggle_sd15sweep": "sweep", "kaggle_sd14sweep": "sweep",
+      "karpathy": "Karpathy test", "real": "Karpathy test", "memecap": "MemeCap", "memecap_real": "MemeCap",
+      "mmceleba": "MM-CelebA-HQ test", "mmceleba_real": "MM-CelebA-HQ test"}
 
 
 REEVAL = {"siglip", "clipfaith"}  # re-evaluations of images another run already counts
@@ -182,11 +184,13 @@ def t_corpus(runs, tdir):
 
 
 def t_guidance(runs, tdir):
-    d = read(runs, "main", "guidance_tests.csv")
     rows = []
-    if d is not None:
+    for name in ("karp", "main"):
+        d = read(runs, name, "guidance_tests.csv")
+        if d is None:
+            continue
         for (ds, m, a, b), g in d.groupby(["dataset", "model", "a", "b"], sort=False):
-            cells = [DS.get(ds, ds), MODEL.get(m, m), f"{a}$-${b}", str(int(g.n.max()))]
+            cells = [DS.get(ds, ds), MODEL.get(m, m), f"{a}$-${b}", f"{int(g.n.max()):,}".replace(",", "{,}")]
             for s in ("pec", "rollout", "ss"):
                 r = g[g.signal == s]
                 cells += [f3(r.dz.iloc[0], 2), fp(r.p_holm.iloc[0])] if len(r) else ["--", "--"]
@@ -194,8 +198,8 @@ def t_guidance(runs, tdir):
     table(f"{tdir}/guidance.tex", "llcr" + "rr" * 3,
           r"Split & Model & Contrast & $n$ & \multicolumn{2}{c}{Grad-PEC} & \multicolumn{2}{c}{Rollout} & "
           r"\multicolumn{2}{c}{SpatialShap} \\ & & & & $d_z$ & $p$ & $d_z$ & $p$ & $d_z$ & $p$",
-          rows, r"Guidance contrasts in evidence concentration (Gini), averaged within and paired by COCO image. $d_z$: paired "
-                r"effect size; $p$: Holm-corrected over all reported tests.", "tab:guidance", star=True)
+          rows, r"Guidance contrasts in evidence concentration (Gini), averaged within and paired by COCO photograph ($n$ = photographs). $d_z$: paired "
+                r"effect size; $p$: Holm-corrected within each corpus.", "tab:guidance", star=True)
 
 
 def t_sweep(runs, tdir):
@@ -274,7 +278,7 @@ def t_faith(runs, tdir):
 
 
 def t_detection(runs, tdir):
-    d = read(runs, "main", "detection.csv")
+    d = read(runs, "karp", "detection.csv")
     rows = []
     if d is not None:
         for _, r in d.iterrows():
@@ -282,19 +286,20 @@ def t_detection(runs, tdir):
                          f"{int(r.n):,}".replace(",", "{,}"), f3(r.chance), f"{f3(r.acc)}$\\pm${f3(r.acc_sd)}",
                          f3(r.macro_f1)])
     table(f"{tdir}/detection.tex", "llrrrr", r"Task & Features & $n$ & Chance & Accuracy & Macro-F1", rows,
-          r"Linear probes, 5-fold cross-validation grouped by caption. $^\dagger$Confounded by resolution "
-          r"(BigGAN 256\,px vs.\ SD 512\,px).", "tab:detection")
+          r"Linear probes on the Karpathy core corpus, 5-fold cross-validation grouped by photograph.", "tab:detection")
 
 
 def t_realgen(runs, tdir):
-    d = read(runs, "main", "real_vs_generated.csv")
     rows = []
-    if d is not None:
+    for name in ("karp", "faces", "memes"):
+        d = read(runs, name, "external_pairs.csv")
+        if d is None:
+            continue
         for _, r in d[d.signal == "pec"].iterrows():
-            rows.append([DS.get(r.dataset, r.dataset), MODEL.get(r.model, r.model), esc(r["mode"]), str(int(r.n)),
-                         f3(r.mean_a), f3(r.mean_b), f3(r.dz, 2), fp(r.p_holm)])
+            rows.append([DS.get(r.dataset, esc(r.dataset)), MODEL.get(r.model, esc(r.model)), esc(r["mode"]),
+                         f"{int(r.n):,}".replace(",", "{,}"), f3(r.mean_a), f3(r.mean_b), f3(r.dz, 2), fp(r.p_holm)])
     table(f"{tdir}/realgen.tex", "lllrrrrr", r"Split & Model & Mode & $n$ & Gini gen. & Gini real & $d_z$ & $p$", rows,
-          "Generated vs.\\ paired real photograph (Grad-PEC Gini); captions of one photograph are averaged, so $n$ counts photographs.", "tab:realgen")
+          "Generated vs.\\ paired real image (Grad-PEC Gini; seeds averaged, $n$ = real images). Holm-corrected within each corpus.", "tab:realgen")
 
 
 def t_masks(runs, tdir):
@@ -330,14 +335,14 @@ def t_maskctl(runs, tdir):
 
 def t_confound(runs, tdir):
     rows = []
-    for name in ("main", "sd35", "klein", "faces", "memes", "edit", "sd15sw", "sd14sw", "siglip"):
+    for name in ("karp", "main", "sd35", "klein", "faces", "memes", "edit", "sd15sw", "sd14sw", "siglip"):
         d = read(runs, name, "confound.csv")
         if d is None:
             continue
         for _, r in d.iterrows():
             if r.model in ("biggan", "magicbrush") or r.design == "logcfg_s>=2":
                 continue
-            task = {"main": f"COCO ({DS.get(r.dataset, r.dataset)})", "faces": "faces", "memes": "memes", "edit": "editing",
+            task = {"karp": "COCO (Karpathy)", "main": f"COCO ({DS.get(r.dataset, r.dataset)})", "faces": "faces", "memes": "memes", "edit": "editing",
                     "sd15sw": "COCO (v3)", "sd14sw": "COCO (v3)"}.get(
                 name, "COCO")
             design = {"text_vs_weak": "caption vs generic", "logcfg": r"$\log s$ sweep"}.get(r.design, esc(r.design))
@@ -432,7 +437,11 @@ def main():
     os.makedirs(os.path.join(a.out, "tables"), exist_ok=True)
     n = write_numbers(runs, a.out)
     td = os.path.join(a.out, "tables")
-    for fn in (t_corpus, t_guidance, t_sweep, t_stability, t_faith, t_detection, t_realgen, t_masks, t_maskctl,
+    n_img, n_traj = t_corpus(runs, td)  # corpus totals as \EV{all:...}
+    with open(os.path.join(a.out, "numbers.tex"), "a") as fh:
+        for k, v in (("n_images", n_img), ("n_traj", n_traj)):
+            fh.write(rf"\expandafter\def\csname ev@all:{k}\endcsname{{{tex_value(int(v))}}}" "\n")
+    for fn in (t_guidance, t_sweep, t_stability, t_faith, t_detection, t_realgen, t_masks, t_maskctl,
                t_confound, t_editctl, t_traj, t_textctl):
         fn(runs, td)
     print(f"{n} numbers, {len(os.listdir(td))} tables -> {a.out}")

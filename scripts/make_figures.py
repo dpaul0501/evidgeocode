@@ -29,6 +29,7 @@ SERIES = [  # fixed order: identity follows the entity, never its rank
     ("klein", "FLUX.2 · COCO", "#eb6834", "s"),
     ("faces", "FLUX.2 · faces", "#1baf7a", "^"),
     ("edit", "FLUX.2 · editing", "#eda100", "D"),
+    ("memes", "FLUX.2 · memes", "#a1458f", "v"),  # CVD worst adjacent dE 9.1 with the four above
 ]
 
 plt.rcParams.update({
@@ -91,14 +92,14 @@ def guidance_figure(runs, out):
             ax.plot(pts[:, 0], pts[:, 1], color=color, linewidth=2, marker=marker, markersize=5,
                     markeredgecolor="white", markeredgewidth=0.8, label=label, zorder=3)
             # selective direct labels in panel (a) only, nudged apart; the legend carries identity
-            if measure == "pec_gini":
-                dy = {"edit": 5, "klein": -5}.get(key, 0)
-                ax.annotate({"sd35": "SD 3.5", "klein": "COCO", "faces": "faces", "edit": "editing"}[key],
+            if measure == "pec_gini" and key in ("sd35", "klein", "faces"):  # editing and memes end together
+                dy = {"klein": -6}.get(key, 0)
+                ax.annotate({"sd35": "SD 3.5", "klein": "COCO", "faces": "faces", "edit": "editing", "memes": "memes"}[key],
                             pts[-1], xytext=(5, dy), textcoords="offset points", va="center",
                             fontsize=6.5, color=INK2)
         ax.set_xlim(0.9, 13)
     handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="outside lower center", ncol=4, frameon=False, fontsize=7)
+    fig.legend(handles, labels, loc="outside lower center", ncol=5, frameon=False, fontsize=7)
     for ext in ("pdf", "png"):
         fig.savefig(os.path.join(out, f"fig_guidance.{ext}"), dpi=300)
     plt.close(fig)

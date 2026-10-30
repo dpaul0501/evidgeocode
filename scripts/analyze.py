@@ -183,6 +183,9 @@ def corpus_summary(df, out):
     put("n_prompts_guidance", int(gen.hf_row.nunique()))
     put("n_images_guidance", int(gen.loc[gen.image_id >= 0, "image_id"].nunique()))
     put("n_real_images", int(df.loc[(df.corpus == "real") & (df.image_id >= 0), "image_id"].nunique()))
+    put("n_captions_guidance", int(gen.groupby(["dataset", "gid"]).ngroups))  # hf_row is COCO-only
+    put("n_units_guidance", int(gen["unit"].nunique()) if "unit" in gen else 0)
+    put("n_external", int((df.corpus == "external").sum()))
     for (ds, m, mo), n in gen.groupby(["dataset", "model", "mode"]).size().items():
         put(f"n_{ds}_{m}_{mo}", int(n))
     return t
@@ -476,7 +479,8 @@ def detection(df, store, out):
     sd = gen[gen.model.isin(["sd14", "sd15"])]
     tasks.append(("mode_sd", sd, "mode"))
     tasks.append(("model_sd14_vs_sd15", sd, "model"))
-    tasks.append(("model_incl_biggan_RESOLUTION_CONFOUNDED", gen[gen["mode"].isin(["text", "weak"])], "model"))
+    if (gen.model == "biggan").any():
+        tasks.append(("model_incl_biggan_RESOLUTION_CONFOUNDED", gen[gen["mode"].isin(["text", "weak"])], "model"))
     real = df[df.corpus == "real"].dropna(subset=ev_cols)
     if len(real):
         rg = pd.concat([gen.assign(label="generated"), real.assign(label="real")])
@@ -950,7 +954,7 @@ def external_pairs(df, pairs, out):
     t["p_holm"] = holm(t["p_wilcoxon"])
     t.to_csv(f"{out}/external_pairs.csv", index=False)
     for _, r in t.iterrows():
-        k = f"extpair_{r.dataset}_{r['mode']}_{r.signal}"
+        k = f"extpair_{r.dataset}_{r.model}_{r['mode']}_{r.signal}"
         for col in ("n", "mean_a", "mean_b", "dz", "p_holm"):
             put(f"{k}_{col.replace('_holm', '')}", int(r[col]) if col == "n" else float(r[col]))
 
