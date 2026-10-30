@@ -136,7 +136,8 @@ def add_units(df: pd.DataFrame) -> pd.DataFrame:
     hr = df["hf_row"].fillna(-1).astype(int) if "hf_row" in df else pd.Series(-1, index=df.index)
     coco = (hr >= 0) & (hr < len(ids))
     df["image_id"] = -1
-    df.loc[coco, "image_id"] = [ids[h] for h in hr[coco]]
+    if coco.any():
+        df.loc[coco, "image_id"] = [ids[h] for h in hr[coco]]
     df["unit"] = np.where(coco, "coco" + df["image_id"].astype(str),
                           df["dataset"].astype(str) + "#" + df["gid"].astype(str))
     return df
@@ -641,17 +642,23 @@ def guidance_sweep(df, seed_per, out, traj_per=None):
             unit = src["unit"] if "unit" in src else src["gid"].astype(str)
             per = grp.assign(unit=unit).groupby(["gid", "unit", "cfg"])[col].mean().reset_index()
             means = per.groupby("cfg")[col].mean()
-            if len(means) < 3:
+            if len(means) < 2:
                 continue
-            rho = stats.spearmanr(means.index, means.values).statistic
+            # rank correlation of the per-scale means needs >= 3 scales; the slope needs 2
+            rho = stats.spearmanr(means.index, means.values).statistic if len(means) >= 3 else np.nan
             r = dict(dataset=ds, model=m, measure=col, n_prompts=per.gid.nunique(), n_units=per.unit.nunique(),
                      n_scales=len(means), spearman_means=rho,
                      **{f"mean_cfg{k:g}": v for k, v in means.items()})
             if smf is not None and per.gid.nunique() > 2:
+                import statsmodels.api as sm
+
+                # caption fixed effects via the within transformation (C(gid) dummies fail to
+                # converge for thousands of captions), errors clustered by unit
                 per["logcfg"] = np.log(per.cfg)
-                groups = pd.factorize(per.unit)[0]  # caption fixed effects, image-clustered errors
-                fit = smf.ols(f"{col} ~ logcfg + C(gid)", data=per).fit(cov_type="cluster",
-                                                                      cov_kwds={"groups": groups})
+                per = per.dropna(subset=[col])
+                dm = per[[col, "logcfg"]] - per.groupby("gid")[[col, "logcfg"]].transform("mean")
+                fit = sm.OLS(dm[col], dm[["logcfg"]]).fit(cov_type="cluster",
+                                                          cov_kwds={"groups": pd.factorize(per.unit)[0]})
                 r.update(slope_logcfg=fit.params["logcfg"], p=fit.pvalues["logcfg"])
                 put(f"sweep_{ds}_{m}_{col}_slope", float(fit.params["logcfg"]))
                 put(f"sweep_{ds}_{m}_{col}_p", float(fit.pvalues["logcfg"]))
@@ -811,7 +818,7 @@ def confound(df, out):
             designs.append(("text_vs_weak", grp[grp["mode"].isin(["text", "weak"])].assign(
                 x=lambda d: (d["mode"] == "text").astype(float)), "x"))
         sweep = grp[grp["mode"].str.match(r"^(edit-)?cfg[0-9.]+$")]
-        if sweep["mode"].nunique() >= 3:
+        if sweep["mode"].nunique() >= 2:
             sw = sweep.assign(x=np.log(sweep["mode"].str.extract(r"cfg([0-9.]+)$")[0].astype(float)))
             designs.append(("logcfg", sw, "x"))
             sw2 = sw[sw.x > 0]
