@@ -73,22 +73,22 @@ def tex_value(v, key: str = "") -> str:
 
 
 def traj_fit(t: pd.DataFrame, sig: str = "pec"):
-    """Commit fraction ~ log s + C(caption), seeds averaged per caption and scale, SEs clustered by image.
+    """Commit fraction ~ log s + C(caption), seeds averaged per caption and scale, errors clustered
+    by source image: analyze.fe_fit, so the table, the text and the CSVs agree."""
+    import sys
 
-    Same model as analyze.py's guidance_sweep, so the table, the text and the CSVs agree.
-    """
-    import statsmodels.formula.api as smf
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from analyze import fe_fit
 
     c = t[t["mode"].str.match(r"^cfg[0-9.]+$")].copy()
     c["s"] = c["mode"].str[3:].astype(float)
-    col = f"{sig}_traj_commit_frac"
     if "unit" not in c:
         c["unit"] = c["gid"].astype(str)
+    col = f"{sig}_traj_commit_frac"
     per = c.groupby(["gid", "unit", "s"])[col].mean().reset_index()
     per["logcfg"] = np.log(per.s)
-    fit = smf.ols(f"{col} ~ logcfg + C(gid)", data=per).fit(cov_type="cluster",
-                                                         cov_kwds={"groups": pd.factorize(per.unit)[0]})
-    return per, float(fit.params["logcfg"]), float(fit.pvalues["logcfg"])
+    b, _, _, p = fe_fit(per, col, ["logcfg"], "logcfg")
+    return per, b, p
 
 
 def write_numbers(runs: dict, out: str):

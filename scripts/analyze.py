@@ -124,6 +124,34 @@ def load(run: str, g: int):
 COCO_IDS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "coco_master_cocoid.json")
 
 
+def fe_fit(d: pd.DataFrame, y: str, cols: list[str], term: str, fe: str = "gid", cluster: str = "unit"):
+    """OLS of y on cols with `fe` fixed effects (within transformation) and errors clustered by
+    `cluster`; returns (coef, lo, hi, p) for `term`.
+
+    Small-sample factor: when every fixed-effect level lies inside one cluster (captions inside
+    their photograph, or caption = cluster), the absorbed fixed effects are not counted, as in
+    Stata's xtreg, fe vce(cluster) (Cameron & Miller 2015, Sec. IV.C); otherwise they are counted,
+    which equals y ~ cols + C(fe) with clustered errors.
+    """
+    import statsmodels.api as sm
+
+    d = d.dropna(subset=[y] + cols)
+    dm = d[[y] + cols] - d.groupby(fe)[[y] + cols].transform("mean")
+    keep = [c for c in cols if dm[c].std() > 1e-12]
+    nan = (float("nan"),) * 4
+    if term not in keep or dm[y].std() < 1e-12:  # no within-caption variation (e.g. a constant map)
+        return nan
+    m = sm.OLS(dm[y], dm[keep]).fit(cov_type="cluster", cov_kwds={"groups": pd.factorize(d[cluster])[0]})
+    nested = bool((d.groupby(fe)[cluster].nunique() == 1).all())
+    n, k, g = len(d), len(keep), (0 if nested else d[fe].nunique())
+    se = float(np.sqrt(m.cov_params().loc[term, term] * (n - k) / (n - k - g)))
+    if not se > 0:
+        return nan
+    b = float(m.params[term])
+    p = float(2 * stats.norm.sf(abs(b / se)))
+    return b, b - 1.959964 * se, b + 1.959964 * se, p
+
+
 def add_units(df: pd.DataFrame) -> pd.DataFrame:
     """unit = the independent sampling unit for tests.
 
@@ -650,18 +678,11 @@ def guidance_sweep(df, seed_per, out, traj_per=None):
                      n_scales=len(means), spearman_means=rho,
                      **{f"mean_cfg{k:g}": v for k, v in means.items()})
             if smf is not None and per.gid.nunique() > 2:
-                import statsmodels.api as sm
-
-                # caption fixed effects via the within transformation (C(gid) dummies fail to
-                # converge for thousands of captions), errors clustered by unit
                 per["logcfg"] = np.log(per.cfg)
-                per = per.dropna(subset=[col])
-                dm = per[[col, "logcfg"]] - per.groupby("gid")[[col, "logcfg"]].transform("mean")
-                fit = sm.OLS(dm[col], dm[["logcfg"]]).fit(cov_type="cluster",
-                                                          cov_kwds={"groups": pd.factorize(per.unit)[0]})
-                r.update(slope_logcfg=fit.params["logcfg"], p=fit.pvalues["logcfg"])
-                put(f"sweep_{ds}_{m}_{col}_slope", float(fit.params["logcfg"]))
-                put(f"sweep_{ds}_{m}_{col}_p", float(fit.pvalues["logcfg"]))
+                b, _, _, pv = fe_fit(per, col, ["logcfg"], "logcfg")  # caption FE, unit-clustered
+                r.update(slope_logcfg=b, p=pv)
+                put(f"sweep_{ds}_{m}_{col}_slope", b)
+                put(f"sweep_{ds}_{m}_{col}_p", pv)
             rows.append(r)
     pd.DataFrame(rows).to_csv(f"{out}/guidance_sweep.csv", index=False)
 
@@ -798,18 +819,8 @@ def confound(df, out):
     rows = []
 
     def fit(d, term, y, extra):
-        """Caption fixed effects via the within transformation (demean by caption),
-        SEs clustered by unit (the image, for COCO captions). Equivalent to
-        y ~ x + C(gid) but stable for thousands of captions."""
-        import statsmodels.api as sm
-
-        cols = [term] + list(extra)
-        d = d.dropna(subset=[y] + cols)
-        dm = d[[y] + cols] - d.groupby("gid")[[y] + cols].transform("mean")
-        keep = [c for c in cols if dm[c].std() > 1e-12]
-        m = sm.OLS(dm[y], dm[keep]).fit(cov_type="cluster", cov_kwds={"groups": pd.factorize(d.unit)[0]})
-        lo, hi = m.conf_int().loc[term]
-        return m.params[term], lo, hi, m.pvalues[term]
+        """Caption fixed effects, SEs clustered by unit (the image, for COCO captions)."""
+        return fe_fit(d, y, [term] + list(extra), term)
 
     for (ds, model), grp in g.groupby(["dataset", "model"]):
         modes = set(grp["mode"])
